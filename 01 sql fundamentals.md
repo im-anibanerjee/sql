@@ -66,6 +66,10 @@ Every SQL statement falls into one of four buckets, by what it actually does to 
 
 These are the exact statements you ran to set up `InterviewPrepSQL` (and, earlier, to drop `MyDatabase`/`SalesDB`) — both DDL, both verified against your real SSMS session, not reproduced from memory:
 
+Write the DDL to create the Accounts, Categories, and Transactions tables, including their primary keys and nullable columns.
+
+so this script is asking us to create the database itself, then the three tables (`Accounts`, `Categories`, `Transactions`) with their columns, types, and primary keys. nothing here reads or returns any data — it only builds the structure that every later query in this doc runs against.
+
 ```sql
 create database InterviewPrepSQL;
 go
@@ -124,6 +128,10 @@ Data lives in **tables** (rows × columns). A **primary key (PK)** is the column
 
 That's the theory. Here's what it actually looks like in a database you didn't design yourself, straight from SQL Server's own metadata:
 
+Write a query that lists every table's primary key column, using SQL Server's own system catalog views instead of a diagram.
+
+so this question is asking us to find every table's primary key column — pulled straight from SQL Server's own metadata, not from a diagram or from memory.
+
 ```sql
 select
     t.name as TableName,
@@ -179,6 +187,10 @@ The query's four `join`s are just walking that chain forward — matching `objec
 
 Want your database's *real* internal numbers instead of the `#101`/`#1` placeholders above? Run this — it's the same query, with the raw ID columns added back in so you can see them instead of just the friendly names they resolve to:
 
+Extend the primary-key lookup query above to also return the raw internal `object_id`/`index_id`/`column_id` values behind each result.
+
+so this question is asking us to find the exact same primary-key-to-column mapping as the query above, except this time showing the raw `object_id`/`index_id`/`column_id` numbers alongside the friendly names, so the walkthrough's `#101`/`#1` placeholders can be swapped for your database's real numbers.
+
 ```sql
 select
     t.object_id as TableObjectID,
@@ -199,6 +211,10 @@ Paste the real output back and the walkthrough above gets redone with your actua
 ### Foreign keys — and a genuine gap worth explaining
 
 Same idea, for foreign keys:
+
+Write a query that lists every foreign key constraint in the database, showing which child column references which parent column.
+
+so this question is asking us to find every foreign key constraint actually enforced on these tables — which child column points at which parent column — using the same metadata-walk as the primary-key query above, just against `sys.foreign_keys`/`sys.foreign_key_columns` instead.
 
 ```sql
 select
@@ -271,6 +287,10 @@ The pattern that repeats across both walkthroughs: a "what exists" view (`sys.ta
 
 ### `select` with an explicit column list
 
+List every transaction with its ID, account, category, date, and amount.
+
+so this question is asking us to find every transaction, showing only the columns we actually want to see — no filtering, no sorting, just a clean read of the whole table.
+
 ```sql
 select TransactionID, AccountID, CategoryID, TransactionDate, Amount
 from Transactions;
@@ -291,6 +311,10 @@ Real output:
 `select` decides which *columns* come back (projection); `from` decides which *table* they come from. Naming the columns explicitly instead of `select *` matters for reasons that don't show up in a 3-table demo but bite hard in a real one: `select *` breaks the moment someone adds a column to the table (your application code gets a column it didn't ask for and didn't expect), it's slower over the wire on a wide table (you're pulling data you'll never use), and it silently changes behavior if column order ever changes. Naming columns is the habit that survives contact with a real schema.
 
 ### `where` — filtering rows
+
+Find every transaction that's an outflow and dated on or after January 10, 2026.
+
+so this question is asking us to find transactions that are both outflows (`Amount` negative) and dated on or after `2026-01-10` — a row only survives if both conditions are true at once.
 
 ```sql
 select TransactionID, Amount, TransactionDate
@@ -322,6 +346,10 @@ Matches the real output exactly: 102, 104, 105.
 
 ### `order by` — and a real NULL-ordering gotcha
 
+List every transaction sorted by account, and within each account, by amount from largest to smallest.
+
+so this question is asking us to find every transaction, sorted by account first and, within each account, by amount largest-to-smallest — mainly to see for real where SQL Server places a `NULL` account in an ascending sort.
+
 ```sql
 select AccountID, TransactionID, Amount
 from Transactions
@@ -349,6 +377,10 @@ The real gotcha is the very first row: **`AccountID = null` sorted first**, ahea
 ## 4. `group by`, `having`, aggregate functions
 
 ### `group by` with aggregates
+
+For each account, find the number of transactions, the total amount, the average amount, and the smallest and largest amount.
+
+so this question is asking us to find per-account summary numbers — how many transactions each account has, plus its total, average, smallest, and largest amount — collapsing the 5 individual rows down to one row per account.
 
 ```sql
 select AccountID, count(*) as NumTransactions, sum(Amount) as NetAmount, avg(Amount) as AvgAmount, min(Amount) as SmallestAmount, max(Amount) as LargestAmount
@@ -380,7 +412,58 @@ AccountID=NULL: [-15.00]          → count=1  sum=-15.00  avg=-15.00  min=-15.0
 
 One more real detail visible in the output, not something to gloss over: `sum`/`min`/`max` printed 2 decimal places (matching the column's `decimal(10,2)` definition), but `avg` printed 6 (`-35.000000`). SQL Server widens the scale (decimal places) specifically for `avg` on a `decimal` column, because division can produce a result the original 2-decimal precision can't represent exactly, and SQL Server would rather show you more precision than silently round it away.
 
+### `group by` on more than one column
+
+`group by` takes a comma-separated list, and SQL Server groups on the *combination* of every column listed — one row per unique combination, not one row per column. `Transactions` doesn't actually show this well (every `AccountID`+`CategoryID` pair in it happens to be unique already, so grouping by both would just return the same 5 rows back), so this one's demonstrated against `InterviewPrepSQLPractice.Employees` instead, where repeated combinations actually exist:
+
+Find how many employees fall under each department-and-manager combination.
+
+so this question is asking us to find how many employees fall under each (department, manager) combination — not just each department on its own, but each department *split further* by who manages them.
+
+```sql
+select
+    DepartmentID,
+    ManagerID,
+    count(*) as EmpCount
+from Employees
+group by DepartmentID, ManagerID;
+```
+
+Expected output, worked out by hand against the seeded `Employees` data (run this for real and paste the output back to confirm it):
+
+| DepartmentID | ManagerID | EmpCount |
+|---|---|---|
+| NULL | NULL | 1 |
+| 1 | NULL | 1 |
+| 1 | 1 | 2 |
+| 2 | NULL | 1 |
+| 2 | 4 | 2 |
+| 3 | NULL | 1 |
+| 3 | 7 | 1 |
+
+Tracing every one of the 9 employees into the group its own `(DepartmentID, ManagerID)` pair puts it in — this is the same hand-verification step the single-column `group by AccountID` example above did, just with a two-part key instead of a one-part key:
+
+```
+Ravi    (Dept=1,    Mgr=NULL) → group (1, NULL)
+Priya   (Dept=1,    Mgr=1)    → group (1, 1)
+Amit    (Dept=1,    Mgr=1)    → group (1, 1)      — same group as Priya
+Neha    (Dept=2,    Mgr=NULL) → group (2, NULL)
+Karan   (Dept=2,    Mgr=4)    → group (2, 4)
+Sara    (Dept=2,    Mgr=4)    → group (2, 4)      — same group as Karan
+Vikram  (Dept=3,    Mgr=NULL) → group (3, NULL)
+Anjali  (Dept=3,    Mgr=7)    → group (3, 7)
+Rohan   (Dept=NULL, Mgr=NULL) → group (NULL, NULL)
+```
+
+Seven distinct `(DepartmentID, ManagerID)` pairs come out of that, matching the 7 rows in the table above — and only two of them have more than one employee in them (`(1, 1)` with Priya+Amit, `(2, 4)` with Karan+Sara, both `EmpCount = 2`), the rest are groups of exactly one.
+
+Seven groups, not three (one per department, if only `DepartmentID` mattered) and not nine (one per employee, if grouping did nothing). Engineering (`DepartmentID = 1`) splits into two of those seven rows because it contains two distinct `ManagerID` values: Ravi himself (`ManagerID = null`, since nobody manages him) and everyone who reports to Ravi (`ManagerID = 1` — Priya and Amit together, hence `EmpCount = 2`). The general rule this demonstrates: adding a second `group by` column never merges existing groups, it only ever splits them further — two rows only count as "the same group" once they match on *every* listed column, not just the first one.
+
 ### `having` — filtering *after* aggregation
+
+Find which accounts have more than one transaction.
+
+so this question is asking us to find which accounts have *more than one* transaction — a filter applied on the group's own `count(*)`, after grouping has already happened, not on any raw column.
 
 ```sql
 select AccountID, count(*) as NumTransactions
@@ -405,6 +488,10 @@ The distinction that actually matters: **`where` filters rows before grouping ha
 
 ### Scalar subquery — a subquery that returns exactly one value
 
+Find every transaction that's larger than the average transaction amount.
+
+so this question is asking us to find any transaction bigger than the average transaction amount across the whole table — using the average itself, computed inline by the subquery, as the comparison value instead of a hard-coded number.
+
 ```sql
 select TransactionID, Amount
 from Transactions
@@ -422,6 +509,10 @@ Real output:
 The inner query `select avg(Amount) from Transactions` runs first, on its own, over all 5 rows: `(-50 + -20 + 500 + -10 + -15) / 5 = 405 / 5 = 81.00`. That single number then substitutes into the outer query as if you'd typed `where Amount > 81.00` — and only one transaction (500.00) is bigger than that. This only works because the subquery is guaranteed to return a single value; a subquery that could return more than one row would make `> (...)` ambiguous, and SQL Server would raise a real error (`Subquery returned more than 1 value`) rather than guess which one you meant.
 
 ### Subquery with `in`
+
+Find every account that has at least one transaction.
+
+so this question is asking us to find every account that actually has at least one transaction — Investment, which has zero, should correctly disappear from the result instead of showing up with empty values.
 
 ```sql
 select AccountName
@@ -444,6 +535,10 @@ The inner query produces the set `{1, 2, 3}` (distinct, non-NULL `AccountID`s th
 The `where AccountID is not null` inside the subquery isn't decorative — it's guarding against a real, sharp-edged trap. If you write `not in (subquery)` and that subquery's result set contains even one `null`, SQL Server's three-valued logic makes the *entire* `not in` comparison `UNKNOWN` for every row, and the outer query silently returns **zero rows** — no error, just an empty, wrong answer. This query uses `in`, not `not in`, so it wasn't at risk here, but filtering NULLs out of the subquery is the habit that keeps you safe the moment you do reach for `not in`.
 
 ### Correlated subquery — re-evaluated once per outer row
+
+For every account, find its own largest transaction.
+
+so this question is asking us to find each account's own single largest transaction, computed separately for every account — including an account, like Investment, that has none at all.
 
 ```sql
 select a.AccountName,
@@ -502,6 +597,10 @@ Everything above used `InterviewPrepSQL` — the schema this whole doc was built
 One more deliberate difference from `InterviewPrepSQL`: this schema **does** enforce real foreign key constraints. `InterviewPrepSQL` left them off on purpose so an orphan row could exist without anything stopping it (see section 2 above). Here, referential integrity is actually turned on — so you get to see the *other* side of that trade-off for real: SQL Server enforcing a relationship instead of just having one described in a diagram.
 
 Run this once in SSMS to set it up. As with everything else in this series, this is your setup script to run and paste the real confirmation output back from — not something to just read past:
+
+Write the DDL to create the Departments and Employees tables, this time with real foreign key constraints enforced, and seed them with sample data.
+
+so this script is asking us to create the practice database and its two tables (`Departments`, `Employees`) — this time with real foreign key constraints enforced — and seed them with the 4 departments and 9 employees every practice question below is based on.
 
 ```sql
 create database InterviewPrepSQLPractice;
