@@ -353,3 +353,39 @@ Write each of these yourself in SSMS against `InterviewPrepSQLPractice` - type i
 5. List every employee's first name, department name, and manager's name, all in one query, using two joins at once.
 
 Once you've run all five and have real output, paste it back and I'll grade it against a hand-verified answer key.
+
+---
+
+## Worked example: the Q4/Q5 self-join bug, traced in full
+
+Your own submission in `02 sql joins.sql` for Q4 and Q5 used `on E1.ManagerID = E2.ManagerID` for the self join. It runs without error and returns plausible-looking rows, but it isn't actually answering "who is this employee's manager" - it's worth a full worked example because it's one of the most common bugs in hierarchy queries (employees/managers, categories/parent categories, comment replies/parent comments), and a favorite interview trick question for exactly that reason.
+
+In plain language: `ManagerID` is just a number sitting in a column - SQL Server doesn't know it's "supposed to mean" another employee's ID. It only knows how to compare it to whatever you put on the other side of `=`. Compare it to `E2.ManagerID` and you're asking "does this other employee report to the same boss I do" (a coworker question). Compare it to `E2.EmployeeID` and you're asking "who actually has the ID number stored in my ManagerID column" (a manager lookup).
+
+Real-life example: imagine every employee badge has a field called "Reports to" containing a number. If you hold two badges side by side and check "do our 'Reports to' numbers match," you're finding two people with the same boss - coworkers. If instead you take one badge's "Reports to" number and go search the badge drawer for whichever badge has that exact number as its own ID, you've found the boss himself. Same number, two completely different searches.
+
+Real-world use case: this is one of the most common bugs in hierarchy queries, and a favorite interview trick question for exactly this reason - it runs cleanly, returns rows that look reasonable at a glance, and is wrong.
+
+Technical deep dive: with `E2.ManagerID = E1.ManagerID`, SQL Server finds every row (including the employee itself) that happens to share the same `ManagerID` value - so Priya and Amit, who both report to Ravi, get matched to each other, and each also matches themselves, which is why the result has 13 rows instead of 9, and why some employees show up paired with their own name as "manager." With `E2.EmployeeID = E1.ManagerID`, SQL Server instead does a primary-key lookup: since `EmployeeID` is the table's PK, at most one row can ever have a given `EmployeeID`, so this can only ever find zero or one row - exactly the "who is my one manager" question, which is why the result lands back at a clean 9 rows, one per employee.
+
+Connecting back: "compare ManagerID to ManagerID" finds siblings; "compare ManagerID to EmployeeID" finds the one row that *is* the manager, because EmployeeID is the unique identifier that ManagerID is actually referencing.
+
+```sql
+-- WRONG (what Q4/Q5 submitted):
+select E1.FirstName as EmployeeName, E2.FirstName as ManagerName
+from Employees E1
+left join Employees E2 on E1.ManagerID = E2.ManagerID
+
+-- RIGHT (the fix):
+select E1.FirstName as EmployeeName, E2.FirstName as ManagerName
+from Employees E1
+left join Employees E2 on E1.ManagerID = E2.EmployeeID
+```
+
+Tracing all 9 employees both ways:
+
+![WRONG self join infographic - E1.ManagerID = E2.ManagerID matches coworkers who share a manager, including each employee with themselves, producing 13 rows instead of 9](diagrams/selfjoin_wrong_mgrid_mgrid.png)
+
+![RIGHT self join infographic - E1.ManagerID = E2.EmployeeID looks up the one row whose own EmployeeID matches, which is the manager's row, producing the correct 9 rows](diagrams/selfjoin_right_mgrid_empid.png)
+
+One thing worth noting explicitly: the `select` list never needed to change. `E1.FirstName as EmployeeName` and `E2.FirstName as ManagerName` were always conceptually correct - `E1` was always meant to be "the employee," `E2` was always meant to be "the manager's row." The bug was entirely in which column `E2` gets looked up by in the `on` clause, not in what the columns are named. Once `E2` is looked up by `EmployeeID` instead of `ManagerID`, `E2.FirstName` genuinely becomes the manager's first name, and the existing aliases become accurate as-is.
