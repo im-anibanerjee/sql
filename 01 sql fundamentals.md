@@ -334,13 +334,7 @@ Real output:
 
 Tracing this against all 5 source rows — `where` is evaluated once per row, independently, and only keeps the row if the whole condition is `TRUE`:
 
-```
-row 101: Amount=-50.00 (< 0 ✓)   Date=2026-01-05 (>= 01-10? ✗)  → AND is FALSE → dropped
-row 102: Amount=-20.00 (< 0 ✓)   Date=2026-01-10 (>= 01-10? ✓)  → AND is TRUE  → kept
-row 103: Amount=500.00 (< 0 ✗)   ...                            → AND is FALSE → dropped
-row 104: Amount=-10.00 (< 0 ✓)   Date=2026-01-15 (>= 01-10? ✓)  → AND is TRUE  → kept
-row 105: Amount=-15.00 (< 0 ✓)   Date=2026-01-20 (>= 01-10? ✓)  → AND is TRUE  → kept
-```
+![WHERE with AND infographic - every Transactions row checked against Amount<0 and TransactionDate>=2026-01-10, with a kept/dropped verdict per row](diagrams/where_filter_trace.png)
 
 Matches the real output exactly: 102, 104, 105.
 
@@ -403,12 +397,7 @@ Real output:
 
 Verified by hand against the raw data (account 1 has transactions -50.00 and -20.00 → count 2, sum -70.00, avg -35.00, min -50.00, max -20.00 — matches exactly):
 
-```
-AccountID=1:    [-50.00, -20.00]  → count=2  sum=-70.00  avg=-35.00  min=-50.00  max=-20.00
-AccountID=2:    [500.00]          → count=1  sum=500.00  avg=500.00  min=500.00  max=500.00
-AccountID=3:    [-10.00]          → count=1  sum=-10.00  avg=-10.00  min=-10.00  max=-10.00
-AccountID=NULL: [-15.00]          → count=1  sum=-15.00  avg=-15.00  min=-15.00  max=-15.00
-```
+![GROUP BY infographic - Transactions bucketed by AccountID, with count/sum/avg/min/max computed independently per bucket, including NULL as its own group](diagrams/groupby_aggregate_trace.png)
 
 One more real detail visible in the output, not something to gloss over: `sum`/`min`/`max` printed 2 decimal places (matching the column's `decimal(10,2)` definition), but `avg` printed 6 (`-35.000000`). SQL Server widens the scale (decimal places) specifically for `avg` on a `decimal` column, because division can produce a result the original 2-decimal precision can't represent exactly, and SQL Server would rather show you more precision than silently round it away.
 
@@ -443,17 +432,7 @@ Expected output, worked out by hand against the seeded `Employees` data (run thi
 
 Tracing every one of the 9 employees into the group its own `(DepartmentID, ManagerID)` pair puts it in — this is the same hand-verification step the single-column `group by AccountID` example above did, just with a two-part key instead of a one-part key:
 
-```
-Ravi    (Dept=1,    Mgr=NULL) → group (1, NULL)
-Priya   (Dept=1,    Mgr=1)    → group (1, 1)
-Amit    (Dept=1,    Mgr=1)    → group (1, 1)      — same group as Priya
-Neha    (Dept=2,    Mgr=NULL) → group (2, NULL)
-Karan   (Dept=2,    Mgr=4)    → group (2, 4)
-Sara    (Dept=2,    Mgr=4)    → group (2, 4)      — same group as Karan
-Vikram  (Dept=3,    Mgr=NULL) → group (3, NULL)
-Anjali  (Dept=3,    Mgr=7)    → group (3, 7)
-Rohan   (Dept=NULL, Mgr=NULL) → group (NULL, NULL)
-```
+![GROUP BY on two columns infographic - all 9 Employees bucketed by the composite (DepartmentID, ManagerID) key, showing which rows land in the same group](diagrams/groupby_multicol_trace.png)
 
 Seven distinct `(DepartmentID, ManagerID)` pairs come out of that, matching the 7 rows in the table above — and only two of them have more than one employee in them (`(1, 1)` with Priya+Amit, `(2, 4)` with Karan+Sara, both `EmpCount = 2`), the rest are groups of exactly one.
 
@@ -559,12 +538,7 @@ Real output:
 
 This is a different shape from the previous two: the inner query references `a.AccountID`, a column from the *outer* query. That reference is what makes it "correlated" — the inner query can't run once on its own the way the scalar/IN subqueries above did; it has to run once **per row** of the outer query, each time plugging in that row's `AccountID`:
 
-```
-outer row a='Checking'(1)           → inner: MAX(Amount) WHERE AccountID=1  → MAX(-50.00,-20.00) = -20.00
-outer row a='Savings'(2)            → inner: MAX(Amount) WHERE AccountID=2  → MAX(500.00)         = 500.00
-outer row a='Sub-Savings (Kids)'(3) → inner: MAX(Amount) WHERE AccountID=3  → MAX(-10.00)          = -10.00
-outer row a='Investment'(4)         → inner: MAX(Amount) WHERE AccountID=4  → no rows match         = NULL
-```
+![Correlated subquery infographic - each Accounts row drives one independent run of the inner MAX(Amount) subquery, scoped to that row's own AccountID](diagrams/correlated_subquery_trace.png)
 
 **Investment correctly shows `null`**, not `0` or an error — `max()` over zero rows has nothing to take a maximum of, so it returns NULL rather than pretending there was a value. That's the same "account with no transactions" edge case, now showing up a third time, in a third different way (missing from `in`'s result, `null` here) — which is exactly the point of designing the schema with that gap in it deliberately, rather than only ever seeing queries succeed cleanly on data with no edge cases in it.
 
@@ -660,3 +634,31 @@ Write each of these yourself in SSMS against `InterviewPrepSQLPractice` — don'
 7. For every employee, show their own salary next to the highest salary in their own department, using a correlated subquery (not a join — joins are next doc).
 
 Once you've run all seven and have real output, paste it back and I'll grade it against a hand-verified answer key the same way the asyncio/GIL/pytest practice questions were graded.
+
+---
+
+## Worked example: Practice Q7, traced in full
+
+Q7 (repeated here): for every employee, show their own salary next to the highest salary in their own department, using a correlated subquery.
+
+Your own submission in `01 sql fundamentals_2.sql` worked through two broken attempts before landing on the real fix — that file stays exactly as you wrote it, narrative and all. This section just takes the final, correct query and traces it visually the same way every other concept in this doc now does, since it's the single most involved query in the whole doc and earns a full worked example.
+
+```sql
+select
+    FirstName,
+    LastName,
+    DepartmentID,
+    Salary,
+    (
+      select max(salary)
+      from Employees E1
+      where E1.DepartmentID = E.DepartmentID
+    ) as DeptMaxSalary
+from Employees E
+```
+
+This works because the subquery is *correlated*: `where E1.DepartmentID = E.DepartmentID` is what makes it correlated. `E1` is the inner query's own copy of `Employees`; `E` is the outer row currently being looked at — so the inner query only scans the rows that share that outer row's department, nothing else. Tracing all nine outer rows:
+
+![Q7 infographic - each Employees row drives one independent run of the inner MAX(salary) subquery, scoped to that row's own DepartmentID, including Rohan's NULL-department edge case](diagrams/q7_dept_max_salary_trace.png)
+
+Nine outer rows, nine separate runs of the inner query, each one scoped to a different slice of `Employees` depending on that row's own department — which is the whole difference from the first broken attempt, which ran the inner query exactly once and reused the same answer for every row.
