@@ -55,8 +55,7 @@ Technical deep dive: SQL Server conceptually evaluates `from A inner join B on <
 
 Connecting back: "only the overlap" is the simple version of "cross product, filtered down by the `on` condition" - same idea, two levels of precision.
 
-Find every transaction together with the name of the account it belongs to.
-
+**Find every transaction together with the name of the account it belongs to.**  
 so this question is asking us to find every transaction paired with its account's name - but only for transactions that actually have a matching account.
 
 ```sql
@@ -101,8 +100,7 @@ Technical deep dive: logically, a left join is an inner join *plus a top-up step
 
 Connecting back: "keep everything on the left, pad the rest with `NULL`" is the plain version of "inner join, plus a one-time top-up of the left table's unmatched rows."
 
-Find every account together with its transactions, including accounts that don't have any.
-
+**Find every account together with its transactions, including accounts that don't have any.**  
 so this question is asking us to find every account, whether or not it has a matching transaction - account information should never disappear just because there's nothing to join it to.
 
 ```sql
@@ -150,8 +148,7 @@ Technical deep dive: `A right join B on <condition>` is *defined* to produce exa
 
 Connecting back: same mechanism as a left join, just pointed at the other table - which is exactly why interview question 4 below ("why does SQL even have `right join`?") is worth having a real answer for, not just "it's symmetric."
 
-Find every transaction together with its account, including transactions that don't have one.
-
+**Find every transaction together with its account, including transactions that don't have one.**  
 so this question is asking us to find every transaction, whether or not it has a matching account - transaction information should never disappear just because the account link is missing.
 
 ```sql
@@ -199,8 +196,7 @@ Technical deep dive: logically, a full outer join is a left join and a right joi
 
 Connecting back: "everything from both sides" is the plain version of "a left join's result and a right join's result, unioned into one."
 
-Find every account and every transaction together, matched up wherever possible, with nothing dropped from either side.
-
+**Find every account and every transaction together, matched up wherever possible, with nothing dropped from either side.**  
 so this question is asking us to find the complete picture - every account (even with no transactions) and every transaction (even with no account) in one result, not just the rows that happen to line up.
 
 ```sql
@@ -247,8 +243,7 @@ Technical deep dive: SQL Server has no idea two aliases secretly point at the sa
 
 Connecting back: "same join, same rules, just both sides are the same table" is the whole concept - there's no new syntax or new matching rule to learn here, which is exactly why doc 01's schema already had `ParentAccountID` built in, specifically for this.
 
-For every account, show its own name next to the name of its parent account, if it has one.
-
+**For every account, show its own name next to the name of its parent account, if it has one.**  
 so this question is asking us to find each account's parent account by name, not just the raw `ParentAccountID` number - and accounts with no parent should still show up, just with a blank parent.
 
 ```sql
@@ -290,8 +285,7 @@ Real-world use case: almost every real reporting query needs this. "Every transa
 
 Technical deep dive: SQL Server evaluates `from A join B on ... join C on ...` left to right, conceptually - `A join B` is computed first (as if producing a temporary result set with every column from both `A` and `B`), and then that entire intermediate result is joined against `C`. This is why a third table's `on` clause can reference columns from *either* of the first two tables, not just the one immediately before it - by the time the second `join` runs, the first join's result already has every column from both `A` and `B` available.
 
-Find every transaction together with its account's name and its category's name, in one query.
-
+**Find every transaction together with its account's name and its category's name, in one query.**  
 so this question is asking us to find every transaction with both its account's name and its category's name attached - two separate lookups chained onto the same base query, not two separate queries.
 
 ```sql
