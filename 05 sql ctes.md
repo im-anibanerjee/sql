@@ -85,7 +85,40 @@ Real output:
 
 ![CTE basic trace](diagrams/cte_basic_trace.png)
 
-A CTE vs a subquery, side by side: `DeptAvg` here is functionally identical to writing `join (select DepartmentID, avg(Salary) as AvgSalary from Employees group by DepartmentID) as d on e.DepartmentID = d.DepartmentID` directly inside the `from` clause - same query, same result, same execution plan. The only thing the CTE actually changes is where the query is written: up front, with a name, instead of nested inline where it's used. That difference stops being cosmetic the moment you need to reference the same derived result more than once in a statement - which is exactly what the next section does.
+### The same question, without a CTE
+
+Two different ways to get there without `with` at all - they're not quite the same thing under the hood, so both are worth seeing side by side.
+
+**Same idea, just inlined** - a derived table instead of a named CTE:
+
+```sql
+select e.FirstName, e.DepartmentID, e.Salary, d.AvgSalary
+from Employees e
+join (
+    select DepartmentID, avg(Salary) as AvgSalary
+    from Employees
+    group by DepartmentID
+) d on e.DepartmentID = d.DepartmentID
+order by e.DepartmentID, e.Salary desc;
+```
+
+This one is genuinely identical to the CTE version above - literally the same subquery, just written inline inside the `join` instead of named up front with `with`. Same execution plan, same result, same everything. The CTE just lets you read the statement top-to-bottom instead of inside-out; the only thing it changes is *where* the query is written, not what it does.
+
+**A different shape entirely** - a correlated scalar subquery:
+
+```sql
+select
+    e.FirstName,
+    e.DepartmentID,
+    e.Salary,
+    (select avg(e2.Salary) from Employees e2 where e2.DepartmentID = e.DepartmentID) as AvgSalary
+from Employees e
+order by e.DepartmentID, e.Salary desc;
+```
+
+This one re-runs the average calculation once *per row* instead of once per department and joining it back - for every employee, it reaches back into `Employees` and averages just the rows matching that employee's own department. Same final numbers come out, but it's a real difference in approach: the derived-table version above computes each department's average exactly once (3 rows out of the grouped subquery, joined back), while this version recomputes the same average up to 8 times - once per employee, with the calculation repeated for every employee sharing a department. Worth remembering as the general correlated-subquery-vs-join tradeoff, not something specific to this one query.
+
+That difference - one named result, reused instead of rewritten or recomputed - stops being purely cosmetic the moment you need to reference the same derived result more than once in a statement, which is exactly what the next section does.
 
 ---
 
