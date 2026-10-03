@@ -66,8 +66,7 @@ Every SQL statement falls into one of four buckets, by what it actually does to 
 
 These are the exact statements you ran to set up `InterviewPrepSQL` (and, earlier, to drop `MyDatabase`/`SalesDB`) — both DDL, both verified against your real SSMS session, not reproduced from memory:
 
-Write the DDL to create the Accounts, Categories, and Transactions tables, including their primary keys and nullable columns.
-
+**Write the DDL to create the Accounts, Categories, and Transactions tables, including their primary keys and nullable columns.**  
 so this script is asking us to create the database itself, then the three tables (`Accounts`, `Categories`, `Transactions`) with their columns, types, and primary keys. nothing here reads or returns any data — it only builds the structure that every later query in this doc runs against.
 
 ```sql
@@ -128,8 +127,7 @@ Data lives in **tables** (rows × columns). A **primary key (PK)** is the column
 
 That's the theory. Here's what it actually looks like in a database you didn't design yourself, straight from SQL Server's own metadata:
 
-Write a query that lists every table's primary key column, using SQL Server's own system catalog views instead of a diagram.
-
+**Write a query that lists every table's primary key column, using SQL Server's own system catalog views instead of a diagram.**  
 so this question is asking us to find every table's primary key column — pulled straight from SQL Server's own metadata, not from a diagram or from memory.
 
 ```sql
@@ -187,8 +185,7 @@ The query's four `join`s are just walking that chain forward — matching `objec
 
 Want your database's *real* internal numbers instead of the `#101`/`#1` placeholders above? Run this — it's the same query, with the raw ID columns added back in so you can see them instead of just the friendly names they resolve to:
 
-Extend the primary-key lookup query above to also return the raw internal `object_id`/`index_id`/`column_id` values behind each result.
-
+**Extend the primary-key lookup query above to also return the raw internal `object_id`/`index_id`/`column_id` values behind each result.**  
 so this question is asking us to find the exact same primary-key-to-column mapping as the query above, except this time showing the raw `object_id`/`index_id`/`column_id` numbers alongside the friendly names, so the walkthrough's `#101`/`#1` placeholders can be swapped for your database's real numbers.
 
 ```sql
@@ -212,8 +209,7 @@ Paste the real output back and the walkthrough above gets redone with your actua
 
 Same idea, for foreign keys:
 
-Write a query that lists every foreign key constraint in the database, showing which child column references which parent column.
-
+**Write a query that lists every foreign key constraint in the database, showing which child column references which parent column.**  
 so this question is asking us to find every foreign key constraint actually enforced on these tables — which child column points at which parent column — using the same metadata-walk as the primary-key query above, just against `sys.foreign_keys`/`sys.foreign_key_columns` instead.
 
 ```sql
@@ -287,8 +283,7 @@ The pattern that repeats across both walkthroughs: a "what exists" view (`sys.ta
 
 ### `select` with an explicit column list
 
-List every transaction with its ID, account, category, date, and amount.
-
+**List every transaction with its ID, account, category, date, and amount.**  
 so this question is asking us to find every transaction, showing only the columns we actually want to see — no filtering, no sorting, just a clean read of the whole table.
 
 ```sql
@@ -312,8 +307,7 @@ Real output:
 
 ### `where` — filtering rows
 
-Find every transaction that's an outflow and dated on or after January 10, 2026.
-
+**Find every transaction that's an outflow and dated on or after January 10, 2026.**  
 so this question is asking us to find transactions that are both outflows (`Amount` negative) and dated on or after `2026-01-10` — a row only survives if both conditions are true at once.
 
 ```sql
@@ -340,8 +334,7 @@ Matches the real output exactly: 102, 104, 105.
 
 ### `order by` — and a real NULL-ordering gotcha
 
-List every transaction sorted by account, and within each account, by amount from largest to smallest.
-
+**List every transaction sorted by account, and within each account, by amount from largest to smallest.**  
 so this question is asking us to find every transaction, sorted by account first and, within each account, by amount largest-to-smallest — mainly to see for real where SQL Server places a `NULL` account in an ascending sort.
 
 ```sql
@@ -372,8 +365,7 @@ The real gotcha is the very first row: **`AccountID = null` sorted first**, ahea
 
 ### `group by` with aggregates
 
-For each account, find the number of transactions, the total amount, the average amount, and the smallest and largest amount.
-
+**For each account, find the number of transactions, the total amount, the average amount, and the smallest and largest amount.**  
 so this question is asking us to find per-account summary numbers — how many transactions each account has, plus its total, average, smallest, and largest amount — collapsing the 5 individual rows down to one row per account.
 
 ```sql
@@ -405,8 +397,7 @@ One more real detail visible in the output, not something to gloss over: `sum`/`
 
 `group by` takes a comma-separated list, and SQL Server groups on the *combination* of every column listed — one row per unique combination, not one row per column. `Transactions` doesn't actually show this well (every `AccountID`+`CategoryID` pair in it happens to be unique already, so grouping by both would just return the same 5 rows back), so this one's demonstrated against `InterviewPrepSQLPractice.Employees` instead, where repeated combinations actually exist:
 
-Find how many employees fall under each department-and-manager combination.
-
+**Find how many employees fall under each department-and-manager combination.**  
 so this question is asking us to find how many employees fall under each (department, manager) combination — not just each department on its own, but each department *split further* by who manages them.
 
 ```sql
@@ -440,8 +431,7 @@ Seven groups, not three (one per department, if only `DepartmentID` mattered) an
 
 ### `having` — filtering *after* aggregation
 
-Find which accounts have more than one transaction.
-
+**Find which accounts have more than one transaction.**  
 so this question is asking us to find which accounts have *more than one* transaction — a filter applied on the group's own `count(*)`, after grouping has already happened, not on any raw column.
 
 ```sql
@@ -467,8 +457,7 @@ The distinction that actually matters: **`where` filters rows before grouping ha
 
 ### Scalar subquery — a subquery that returns exactly one value
 
-Find every transaction that's larger than the average transaction amount.
-
+**Find every transaction that's larger than the average transaction amount.**  
 so this question is asking us to find any transaction bigger than the average transaction amount across the whole table — using the average itself, computed inline by the subquery, as the comparison value instead of a hard-coded number.
 
 ```sql
@@ -489,8 +478,7 @@ The inner query `select avg(Amount) from Transactions` runs first, on its own, o
 
 ### Subquery with `in`
 
-Find every account that has at least one transaction.
-
+**Find every account that has at least one transaction.**  
 so this question is asking us to find every account that actually has at least one transaction — Investment, which has zero, should correctly disappear from the result instead of showing up with empty values.
 
 ```sql
@@ -515,8 +503,7 @@ The `where AccountID is not null` inside the subquery isn't decorative — it's 
 
 ### Correlated subquery — re-evaluated once per outer row
 
-For every account, find its own largest transaction.
-
+**For every account, find its own largest transaction.**  
 so this question is asking us to find each account's own single largest transaction, computed separately for every account — including an account, like Investment, that has none at all.
 
 ```sql
@@ -572,8 +559,7 @@ One more deliberate difference from `InterviewPrepSQL`: this schema **does** enf
 
 Run this once in SSMS to set it up. As with everything else in this series, this is your setup script to run and paste the real confirmation output back from — not something to just read past:
 
-Write the DDL to create the Departments and Employees tables, this time with real foreign key constraints enforced, and seed them with sample data.
-
+**Write the DDL to create the Departments and Employees tables, this time with real foreign key constraints enforced, and seed them with sample data.**  
 so this script is asking us to create the practice database and its two tables (`Departments`, `Employees`) — this time with real foreign key constraints enforced — and seed them with the 4 departments and 9 employees every practice question below is based on.
 
 ```sql
