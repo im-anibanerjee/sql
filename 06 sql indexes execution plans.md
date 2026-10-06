@@ -37,11 +37,12 @@ from Nums;
 
 ## How the diagrams in this doc work
 
-Every other doc in this series traces rows through a query, step by step. This one is different - the point here isn't what rows come out, it's how much *work* SQL Server did to get them. So this doc uses three kinds of diagram:
+Every other doc in this series traces rows through a query, step by step. This one is different - the point here isn't what rows come out, it's how much *work* SQL Server did to get them. So this doc uses four kinds of diagram:
 
-- **One bar chart** near the end, comparing the real, measured **logical reads** number across all four plans side by side.
+- **One structural diagram** in section 1, showing what a clustered index and a non-clustered index actually look like as sorted structures, plus a second one showing the same idea broken into B-tree levels (root/branch/leaf).
 - **One "how to read a plan" guide**, right after section 1 - a single labelled execution-plan box explaining what each piece of text in a plan operator actually means, before any real plans show up.
 - **One recreated execution-plan tree per scenario**, inline in each section - redrawn from the real plan each query actually produced, in the same box-and-arrow shape SSMS itself uses (read right-to-left, exactly like a real plan).
+- **One bar chart** near the end, comparing the real, measured **logical reads** number across all four plans side by side.
 
 Two of those recreated plans - the Table Scan in section 2 and the Clustered Index Seek in section 4 - are drawn with a **dashed border** and labelled "reasoned, not screenshotted." Those two specific plans were never actually captured with Ctrl+M during this exercise; the queries were only run with `SET STATISTICS IO ON`, and the plan shape was inferred afterward from the IO numbers plus a structural fact about SQL Server (a heap with zero indexes has exactly one possible access path; an equality filter on a unique clustering key with one matching row has no cheaper path than a direct seek). The inference is about as safe as inferences get, but it's not the same thing as watching the real graphical plan, so it's marked differently on purpose rather than presented as identical to the three plans (sections 3's two plans and section 5's) that were actually screenshotted from real `.sqlplan` output.
 
@@ -57,11 +58,28 @@ Real-world use case: you make the column you search on *most often, most selecti
 
 Technical deep dive: a clustered index is a B-tree where the **leaf level is the actual data rows**, in key order. A non-clustered index is a separate B-tree whose leaf level holds just the indexed column(s) plus a *row locator* back to the real row - if the table is a heap (no clustered index), that locator is a physical Row ID (RID); if the table has a clustered index, the locator is the clustering key's value instead, and fetching the rest of the row means a second trip through the clustered index, which the execution plan calls a **Key Lookup**.
 
+"B-tree" is the one word in that paragraph that's hardest to picture from text alone, so here it is drawn out as actual levels, right where it's being explained:
+
+![B-tree structure - root, branch, leaf](diagrams/btree_structure.png)
+
+In the simplest possible terms: think of a sorted phone book so big you'd never find a name by flipping page by page. So someone adds a table of contents on top of it. The very first page says "A-M in this half, N-Z in that half" - that's the **root page**. Flip to the N-Z half, and there's another, smaller table of contents inside it, narrowing things down further - that's a **branch page** (there can be several branch levels stacked for a really big index, but one is enough to show the idea). Finally you land on the actual page with the actual name and phone number printed on it - that's the **leaf page**, the bottom level, where the real content lives.
+
+Both trees in the picture have that exact same root -> branch -> leaf shape - the only difference is *what sits at the leaf level*, which is the one fact this whole doc keeps coming back to:
+
+- **Clustered index (left, teal):** the leaf page **is** the row. Land on the leaf for `OrderID 249` and you already have everything - `AccountID`, `OrderStatus`, `OrderDate`, `Amount`, all of it. Nothing more to fetch. This is exactly what "the leaf level is the actual data rows" means in the paragraph above.
+- **Non-clustered index (right, violet):** the leaf page only holds the key you searched on (`AccountID`) plus a little arrow (`-> OrderID 249`) pointing at where the real row lives - this arrow is the "row locator" the paragraph above mentions. Landing on this leaf does *not* give you the row - it gives you directions to the row. Following that arrow back into the clustered tree's own leaf level is exactly what the paragraph above calls a **Key Lookup**, shown as the dashed amber arrow connecting the two trees.
+
 Connecting back: "the book itself vs. an appendix pointing into it" is the plain version of "the clustered index physically stores the row; a non-clustered index stores a value plus a pointer back to that row."
 
 ![Clustered vs non-clustered index structure](diagrams/index_structure.png)
 
-The picture above is the same two paragraphs as a structure, not prose: the left panel is the clustered index - sorted row cards, each one holding the *entire* row, because the index *is* the table. The right panel is a non-clustered index - sorted entries that only hold the indexed column plus a thin pointer. The dashed amber arrows are the "Key Lookup" trip: a non-clustered entry matching `AccountID = 250` found its key fast, but then has to jump back into the clustered panel to fetch the rest of the row - the exact extra hop that drives section 3's surprise below.
+The picture above is the same two paragraphs as a structure, not prose, just drawn as flat sorted panels instead of tree levels: the left panel is the clustered index - sorted row cards, each one holding the *entire* row, because the index *is* the table. The right panel is a non-clustered index - sorted entries that only hold the indexed column plus a thin pointer. The dashed amber arrows are the same "Key Lookup" trip as above: a non-clustered entry matching `AccountID = 250` found its key fast, but then has to jump back into the clustered panel to fetch the rest of the row - the exact extra hop that drives section 3's surprise below.
+
+### What does "indexed column" actually mean?
+
+This phrase trips a lot of people up at first, so in the simplest terms possible: the **indexed column** is just the column you told SQL Server to build the index on - the column whose values get copied out, sorted, and stored inside the index.
+
+Look back at `create nonclustered index IX_Orders_AccountID on Orders(AccountID)` from section 3 below. The column sitting inside the parentheses - `AccountID` - is the indexed column. That means a separate, sorted mini-copy of just the `AccountID` values (plus a pointer back to each real row) gets built and stored as this index. Any column *not* listed there - `OrderStatus`, `OrderDate`, `Amount` - is **not** indexed by this particular index. Those values don't exist anywhere inside this index's own pages at all, which is exactly why fetching them for a matching row needs that extra Key Lookup trip back into the real table - the index genuinely doesn't have them.
 
 ---
 
@@ -128,6 +146,15 @@ The obvious next move: index the column you're filtering on.
 create nonclustered index IX_Orders_AccountID on Orders(AccountID)
 ```
 
+In the simplest terms, reading this line left to right, piece by piece:
+
+- `create nonclustered index` - the actual command. It tells SQL Server "build me a brand new non-clustered index" (as opposed to `create clustered index`, or a plain `create table`).
+- `IX_Orders_AccountID` - just a name you're picking for this index, the same way you'd name a file. It can technically be called anything, but there's a common habit: `IX_` (short for "index") + the table name + the column name, so anyone reading it later instantly knows what it's for without opening it up and looking.
+- `on Orders` - which table to build it on.
+- `(AccountID)` - which column, inside parentheses, to actually build the index on. This is the **indexed column** explained in section 1 above.
+
+Put together in plain words: "create a non-clustered index, call it `IX_Orders_AccountID`, on the `Orders` table, built on the `AccountID` column."
+
 Re-run the exact same query. You'd expect this to get much cheaper now - and here's the real, confirmed surprise: it doesn't.
 
 **Find every order placed on account 250, now that `AccountID` is indexed.**  
@@ -155,13 +182,34 @@ select * from Orders with (index(IX_Orders_AccountID)) where AccountID = 250
 set statistics io off
 ```
 
+This is a completely normal `select *` query with one unusual piece bolted into the middle: `with (index(IX_Orders_AccountID))`. That's called an **index hint**. Normally you never write this - SQL Server's own optimizer decides on its own, every time, which index (if any) is actually worth using, based on cost. This phrase is a direct override that says "don't think about it, don't pick for yourself - use this exact index, whether you believe it's a good idea or not."
+
+It was used here on purpose, only as a one-time experiment, to force SQL Server down the path it had already turned down - specifically so its own natural choice (`256` reads, the scan above) could be compared against "what happens if I make you use the index anyway" (`402` reads, below). You'd basically never write an index hint in real production code unless you had strong, specific proof the optimizer was making a mistake - and as this very comparison shows, most of the time it isn't.
+
 The real plan this time: **Index Seek** on `IX_Orders_AccountID` (cost 1%) feeding into a **Key Lookup** on the clustered index `PK_Orders` (cost 99%), joined by **Nested Loops**. Real Messages-tab line: **`Table 'Orders'. Scan count 1, logical reads 402, physical reads 3, read-ahead reads 100.`**
 
 ![Index seek + Key Lookup plan - real, from your screenshot](diagrams/plan_keylookup.png)
 
-Read right to left, same as the "how to read a plan" guide above: `Index Seek` (top right) finds the 100 matching keys almost for free - 1% of total cost. Each one of those 100 keys then triggers its own separate trip into the `Key Lookup` box (bottom right) to fetch the columns the index didn't carry - that single box alone accounts for 99% of the cost, because it's really 100 small lookups, not one. Both feed into `Nested Loops`, which pairs each seek result with its matching lookup result, and that's what reaches `SELECT`.
+In the simplest possible terms, picture trying to find every book by one author in a huge library:
+
+- **Index Seek (top right, cost 1%):** this is walking up to a card catalog drawer that's already sorted by author name. You flip straight to the author, and in seconds you have a stack of 100 little index cards, each one just saying "shelf 42, slot 7" - a pointer to where the real book is. Fast, almost free, because the catalog drawer itself is small and already sorted.
+- **Key Lookup (bottom right, cost 99%):** now you actually need the books, not just the cards. So for every single one of those 100 cards, you personally walk across the library, find the shelf, pull the book, and walk back. That's 100 separate walking trips. Each individual trip isn't expensive on its own, but doing it 100 times adds up to almost all of the total effort in this entire plan - which is exactly why this one box shows 99% of the cost even though the catalog lookup felt instant.
+- **Nested Loops (middle box):** this is the "for each card, go do one walk-to-the-shelf trip, then glue the card and the book together" step. It takes the 100 cards one at a time, triggers the matching Key Lookup trip for each one, and pairs them up into a complete result row.
+- **SELECT (far left):** once every card has been paired with its book, this is just "hand me everything you collected" - the final output the query returns.
+
+So reading the picture right to left, the same direction every plan in this doc reads: `Index Seek` finds the 100 matching cards cheaply -> `Nested Loops` takes them one at a time and asks `Key Lookup` to fetch the full row for each -> `Key Lookup` does that fetching, 100 separate times, which is the expensive part -> the paired-up results flow out through `SELECT`. That's why 1% and 99% roughly add up to the whole cost - almost all the real work is in the 100 individual fetch trips, not in finding which 100 rows to fetch in the first place.
 
 **402 is worse than 256.** That's the whole lesson, with real numbers behind it: the Index Seek part is nearly free - finding the 100 matching `AccountID` entries in the index's own small B-tree costs almost nothing. But a non-clustered index on its own only has the column(s) it was built on; to get the other four columns (`OrderStatus`, `OrderDate`, `Amount`, etc.) for each matching row, SQL Server has to do a separate **Key Lookup** - a whole extra trip back into the clustered index - *once per matching row*. 100 individual lookups, each costing a handful of page reads to walk the clustered B-tree, adds up to more total reads than one sequential scan of the entire (small, 256-page) table. The optimizer knew this and scanned instead - a real example of the exact interview question "why would SQL Server ignore an index that exists?"
+
+### Then why build this index at all, if forcing it just makes things worse?
+
+Fair question to stop and ask here, since on the surface it looks like 20 minutes were spent building something useless. Worth answering directly: this index was built to test an idea, not because it was already known to help. In real life, you usually don't know ahead of time whether an index will actually help one specific query - you build it because "this column gets searched a lot" is a reasonable-sounding reason, and then you check whether it was actually a good call.
+
+When this one was checked, SQL Server itself quietly said "no thanks" and used the scan instead (256 reads) - it never, on its own, chose the slow 402-read path. That 402 number only exists because it was forced with a hint, on purpose, as a deliberate experiment: "what if you were made to use the index anyway - would it really be worse?" And yes, it really was worse, which is the actual proof that SQL Server's own decision to skip the index was the right call for this specific query.
+
+So the index wasn't a mistake - it was a controlled experiment that taught an important, very real lesson: adding an index does not automatically make a query faster. SQL Server checks the real cost at query time and only uses an index when it's genuinely cheaper. Here, with `select *` pulling back all 5 columns for 100 out of 50,000 rows, the index alone wasn't enough on its own - it only held `AccountID`, so every match still needed a separate trip back to fetch the rest of the row.
+
+And the fix, shown in section 5 below, wasn't to throw the index away - it was to make it carry a few more columns (turning it into a covering index), which then won big (2 reads). So this plain non-clustered index wasn't useless in general either - it just needed one more ingredient to pay off for *this particular* query shape. The same index, even without those extra columns, could still be exactly the right choice for a different query - one that only asks for `AccountID` itself with nothing else, or one where the filter matches far fewer rows (say 2 or 3 out of 50,000 instead of 100), where the Key Lookup overhead would be tiny instead of adding up to 99% of the cost. Whether an index helps always depends on the exact query asking for it, not just which column is being filtered on.
 
 ---
 
@@ -247,6 +295,8 @@ Same filter (`AccountID = 250`, 100 of 50,000 rows), same table, four different 
 
 | Term | What it means |
 |---|---|
+| Indexed column | The column you named inside the parentheses when creating the index - its values get copied, sorted, and stored in the index; columns left out aren't in the index at all |
+| Index hint (`with (index(...))`) | A direct override forcing SQL Server to use a specific index, bypassing its own cost-based choice - rare in real code, mainly a debugging/testing tool |
 | Heap | A table with no clustered index - rows have no enforced physical order |
 | Clustered index | The table's own data, physically sorted by the chosen key; at most one per table |
 | Non-clustered index | A separate, smaller sorted structure of key values + pointers back to the real row; many allowed per table |
