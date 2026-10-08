@@ -387,6 +387,64 @@ That row is still sitting in `OrderItems3NF` right now, pointing at an `OrderID`
 
 ---
 
+## 7. When denormalizing is actually the right call
+
+The folk wisdom going into this section was simple: a normalized schema needs a join to get `CustomerCity` that a flat table never did, so flattening should read cheaper. Four real tests later, on a scaled-up version of this exact schema (`CustomersBig`, 500 rows; `OrdersBig3NF`/`OrdersBigFlat`, 50,000 rows each - same scale as doc 06's `Orders`, built specifically so the numbers would be big enough to actually measure), that folk wisdom turned out to be wrong three times out of four - and the one time it held, it held for a reason worth understanding precisely, not just "joins are slow."
+
+![Real logical reads across all four scenarios](diagrams/denorm_reads_comparison.png)
+
+**Test A - one customer, equality filter.**  
+so this is the simplest possible case: fetch one customer's own order history, the kind of query an application runs constantly.
+
+```sql
+select o.OrderID, o.OrderDate, c.CustomerCity
+from OrdersBig3NF o join CustomersBig c on o.CustomerID = c.CustomerID
+where o.CustomerID = 250
+
+select OrderID, OrderDate, CustomerCity from OrdersBigFlat where CustomerID = 250
+```
+
+Real result: normalized **215** logical reads (213 on `OrdersBig3NF` + 2 on `CustomersBig`), flat **217**. Essentially tied. `OrdersBig3NF` didn't even use its own `CustomerID` index - it fell back to a Clustered Index Scan, exactly like doc 06 section 3's lesson about a non-covering index, while `OrdersBigFlat` paid for an Index Seek + Key Lookup instead. The one-time join cost here was 2 logical reads - a single cheap probe into a small, mostly-cached table. Nowhere near enough to matter.
+
+**Test B - 50 customers, flat table's index not covering.**  
+so this is the same idea at a bigger fan-out: 50 distinct customers, ~5,000 matching orders, and the flat table's existing index only holds `CustomerID`.
+
+```sql
+select o.OrderID, o.OrderDate, c.CustomerCity
+from OrdersBig3NF o join CustomersBig c on o.CustomerID = c.CustomerID
+where o.CustomerID between 1 and 50
+
+select OrderID, OrderDate, CustomerCity from OrdersBigFlat where CustomerID between 1 and 50
+```
+
+Real result: normalized **215**, flat **435** - normalized wins by 2x here. `OrdersBigFlat`'s index doesn't include `OrderDate` or `CustomerCity`, so it paid a Key Lookup *per matching row* - 5,000 separate trips back into its own clustered index. That's the exact same tax doc 06 warned about, just showing up on the "simpler" flat table this time instead of the normalized one. Flattening the customer data didn't fix an unrelated indexing gap on the order data.
+
+**Test C - 50 customers, both sides given their best possible index.**  
+so this is the fair fight: give the flat table a genuinely covering index (`CustomerID`, include `OrderDate, CustomerCity` - zero Key Lookups possible) and give the normalized table the best index it can have for its own columns, then compare the optimizer's own natural choice on both.
+
+```sql
+create nonclustered index IX_OrdersBigFlat_Covering on OrdersBigFlat(CustomerID) include (OrderDate, CustomerCity)
+create nonclustered index IX_OrdersBig3NF_Covering on OrdersBig3NF(CustomerID) include (OrderDate)
+```
+
+Real result: normalized **15** (13 + 2), flat **19**. Normalized *still* wins, even with zero Key Lookups on either side and zero excuses left for the flat table. The reason is visible right in the plan: the normalized query used a **Hash Match**, reading `OrdersBig3NF` and `CustomersBig` each exactly once, while the flat table's covering index rows are physically wider - every single index entry carries a full copy of `CustomerCity` - so fewer rows fit per 8KB page, meaning more pages, meaning more reads, even with no join at all. Denormalizing traded "avoid a join" for "store more bytes per row," and here the bytes cost more than the join did.
+
+**Test D - same query, join deliberately forced to Nested Loops.**  
+so this is the one experiment designed to fail on purpose, the same move as doc 06's index hint: take the choice away from the optimizer and force the worst plan shape, to see what it would cost if something other than SQL Server's own judgment picked the join strategy.
+
+```sql
+select o.OrderID, o.OrderDate, c.CustomerCity
+from OrdersBig3NF o
+inner loop join CustomersBig c on o.CustomerID = c.CustomerID
+where o.CustomerID between 1 and 50
+```
+
+Real result: **10,013** logical reads (13 on `OrdersBig3NF` + **10,000** on `CustomersBig`) against the flat table's unchanged **19**. `inner loop join` forced SQL Server to seek into `CustomersBig` separately for *every one of the 5,000 matching rows* instead of hashing it once - `CustomersBig`'s own stats line shows `Scan count 0`, confirming it never scanned, only seeked, 5,000 times over. This is the real, measured version of the Key-Lookup tax - 527x worse than the flat table, and 667x worse than the normalized schema's own natural plan from Test C.
+
+**What this actually proves.** Normalizing isn't expensive at read time just because it needs a join - SQL Server's optimizer is genuinely good at making a join against a small, well-indexed table cheap, sometimes cheaper than the redundant storage denormalizing requires (Test C). The real risk denormalizing protects against is Test D: a join that *doesn't* get a cheap plan - forced by a bad hint, bad or stale statistics leading to a wrong cardinality estimate, a query against a linked server or a different database that can't be hashed the same way, or an application issuing the join as thousands of separate per-row queries instead of one batched SQL join (the classic "N+1 query" bug in an ORM). Denormalizing removes that entire risk by removing the join - trading update anomalies and extra storage for a guarantee that the expensive plan in Test D can never happen, because there's nothing left to join. That trade is worth making for a query that's extremely hot, sits downstream of a join target the optimizer can't reliably hash (cross-database, linked server), or lives in a reporting/analytics workload that's read far more often than it's written and already tolerates some staleness. For an ordinary, well-indexed, single-database join against a modest dimension table - which covers most real schemas - normalizing isn't just the safer design for anomalies, it's frequently the cheaper one to read from too, which is the opposite of the answer most people walk into an interview ready to give.
+
+---
+
 ## Quick reference
 
 | Term | Plain meaning |
@@ -403,11 +461,188 @@ That row is still sitting in `OrderItems3NF` right now, pointing at an `OrderID`
 
 ---
 
-## What's next
+## 8. From-scratch schema design: a gym class-booking system
 
-Everything above is normalization as a *correctness* fix - proven with real anomalies, triggered and resolved, on real data. Two things from the original plan for this doc haven't been covered yet and are still coming:
+Everything so far started from a bad table and fixed it. This is the opposite exercise - go straight to a normalized design from a plain-English requirement, the way a real schema actually gets built the first time.
 
-- **When denormalizing is actually the right call** - tying back to doc 06's join-cost and Key-Lookup lessons, since a fully normalized schema isn't free: every `Orders3NF` query that wants a customer's city now needs a join that `OrdersFlat` never did.
-- **A from-scratch schema-design exercise** - given a plain-English requirement, design a normalized schema for it directly, instead of starting from a bad table and fixing it.
+**The requirement.** A gym wants a database for its class-booking system. Members sign up and can book into classes - a member can book many classes, and a class session can have many members booked into it. Each class (like "Yoga" or "Spin") is taught by one instructor per session, happens in one room, and has a specific date and time. Instructors can teach more than one class. Rooms have a name and a maximum capacity. The gym also wants to track each member's membership payments - the date they paid, the amount, and which membership plan ("Monthly" or "Annual") it was for.
 
-Both will get folded into this doc once they've been worked through the same way everything above was - for real, not reasoned about in the abstract.
+**The design decision that matters most here:** split "Yoga" (the *idea* of a class) from "Yoga, taught by Priya, in Room 2, Monday 6pm" (one specific *occurrence* of it). Conflating those two is the exact same mistake `OrdersFlat` made with Customer and Order - if `InstructorName` and `RoomName` were baked directly onto a single "Classes" row, updating Monday's instructor would leave Wednesday's Yoga row stale (update anomaly), deleting the only scheduled Yoga session would delete "Yoga" as a concept entirely (delete anomaly), and a brand-new class type couldn't exist until it already had a session scheduled (insert anomaly) - the identical three bugs from section 3, just in a new domain. So `Classes` (the name, nothing else) and `Sessions` (one scheduled occurrence, referencing a class, an instructor, a room, a date, and a time) are two separate tables from the start, not something to discover later by fixing anomalies.
+
+Seven tables, each one real-world thing, each with its own key:
+
+```sql
+create table Instructors (
+    InstructorID   int identity(1,1) primary key,
+    InstructorName varchar(100) not null
+)
+
+create table Rooms (
+    RoomID      int identity(1,1) primary key,
+    RoomName    varchar(50) not null,
+    MaxCapacity int not null
+)
+
+create table Classes (
+    ClassID   int identity(1,1) primary key,
+    ClassName varchar(50) not null
+)
+
+create table Sessions (
+    SessionID    int identity(1,1) primary key,
+    ClassID      int not null references Classes(ClassID),
+    InstructorID int not null references Instructors(InstructorID),
+    RoomID       int not null references Rooms(RoomID),
+    SessionDate  date not null,
+    SessionTime  time not null
+)
+
+create table Members (
+    MemberID   int identity(1,1) primary key,
+    MemberName varchar(100) not null,
+    Email      varchar(100) not null,
+    JoinDate   date not null
+)
+
+create table Bookings (
+    SessionID   int not null references Sessions(SessionID),
+    MemberID    int not null references Members(MemberID),
+    BookingDate date not null,
+    primary key (SessionID, MemberID)
+)
+
+create table MembershipPlans (
+    PlanID    int identity(1,1) primary key,
+    PlanName  varchar(50) not null,
+    PlanPrice decimal(10,2) not null
+)
+
+create table Payments (
+    PaymentID   int identity(1,1) primary key,
+    MemberID    int not null references Members(MemberID),
+    PlanID      int not null references MembershipPlans(PlanID),
+    AmountPaid  decimal(10,2) not null,
+    PaymentDate date not null
+)
+```
+
+**Why each table is 3NF, checked one at a time:**
+
+- `Instructors`, `Rooms`, `Classes`, `Members`, `MembershipPlans` - single-fact lookup tables. Every column depends only on that table's own single-column key, nothing to check beyond that.
+- `Sessions` - key is `SessionID`. `ClassID`, `InstructorID`, `RoomID`, `SessionDate`, `SessionTime` all describe *this specific scheduled occurrence* directly - none of them depend on each other (knowing the room doesn't tell you the instructor), so there's no transitive chain here, just four honest foreign keys plus two facts of its own.
+- `Bookings` - the many-to-many junction, composite key `(SessionID, MemberID)`. `BookingDate` depends on the *whole* key (when did *this* member book *this* session) - not on either half alone, so no partial dependency, which is exactly the 2NF rule from section 5 applied correctly this time instead of violated.
+- `Payments` - key is `PaymentID`. `AmountPaid` might look like it duplicates `MembershipPlans.PlanPrice`, but it isn't a normalization violation: `AmountPaid` is a fact about *this specific payment event* (what was actually charged, which can differ from the plan's list price - a discount, a proration, a price change after the member originally signed up), not a value that's always functionally determined by `PlanID`. Storing it separately is correct, not redundant - the test is "does this column's value always follow automatically from the key," not "does this column look similar to one somewhere else."
+
+**An honest limitation, flagged rather than hidden:** this schema does not prevent a room from being double-booked. A `unique` constraint on `Sessions(RoomID, SessionDate, SessionTime)` would catch two sessions scheduled for the *exact same* date and start time in the same room, but it would *not* catch a genuinely overlapping pair - say a 6:00-7:00 session and a 6:30-7:30 session in the same room, which have different `SessionTime` values and would both insert without complaint. Catching real time-range overlaps needs either a `datetime2` range check enforced in application logic, a trigger, or (in newer SQL Server versions) a temporal/period-based constraint - none of which this doc has built or tested for real, so none of it is claimed here as done. Worth saying out loud in an interview if asked "does your schema prevent double-booking" - the honest answer is "partially, and here's exactly where it stops."
+
+**What's left to actually verify, for real.** Build this schema, put a handful of real rows into it - including two sessions of the same class (so "Yoga" exists more than once with a different instructor/room/time on each), one member booked into more than one session, and at least one payment - then run the same kind of proof this whole doc has run on everything else: update one instructor's name once and confirm every one of their sessions shows the new name through a join; delete a session and confirm the instructor/room/class rows it referenced all survive; try to insert a brand-new class with zero sessions scheduled yet and confirm that works (the thing `OrdersFlat`'s equivalent couldn't do). Here's the build-and-test script:
+
+```sql
+create table Instructors (InstructorID int identity(1,1) primary key, InstructorName varchar(100) not null)
+create table Rooms (RoomID int identity(1,1) primary key, RoomName varchar(50) not null, MaxCapacity int not null)
+create table Classes (ClassID int identity(1,1) primary key, ClassName varchar(50) not null)
+create table Sessions (
+    SessionID int identity(1,1) primary key,
+    ClassID int not null references Classes(ClassID),
+    InstructorID int not null references Instructors(InstructorID),
+    RoomID int not null references Rooms(RoomID),
+    SessionDate date not null,
+    SessionTime time not null
+)
+create table Members (MemberID int identity(1,1) primary key, MemberName varchar(100) not null, Email varchar(100) not null, JoinDate date not null)
+create table Bookings (
+    SessionID int not null references Sessions(SessionID),
+    MemberID int not null references Members(MemberID),
+    BookingDate date not null,
+    primary key (SessionID, MemberID)
+)
+create table MembershipPlans (PlanID int identity(1,1) primary key, PlanName varchar(50) not null, PlanPrice decimal(10,2) not null)
+create table Payments (
+    PaymentID int identity(1,1) primary key,
+    MemberID int not null references Members(MemberID),
+    PlanID int not null references MembershipPlans(PlanID),
+    AmountPaid decimal(10,2) not null,
+    PaymentDate date not null
+)
+
+insert into Instructors (InstructorName) values ('Priya Nair'), ('Arjun Mehta')
+insert into Rooms (RoomName, MaxCapacity) values ('Room 1', 20), ('Room 2', 15)
+insert into Classes (ClassName) values ('Yoga'), ('Spin')
+insert into Sessions (ClassID, InstructorID, RoomID, SessionDate, SessionTime) values
+    (1, 1, 2, '2026-10-12', '18:00'),  -- Yoga, Priya, Room 2, Monday 6pm
+    (1, 2, 1, '2026-10-14', '19:00'),  -- Yoga, Arjun, Room 1, Wednesday 7pm
+    (2, 2, 1, '2026-10-13', '07:00')   -- Spin, Arjun, Room 1, Tuesday 7am
+insert into Members (MemberName, Email, JoinDate) values
+    ('Kavya Reddy', 'kavya@example.com', '2026-09-01'),
+    ('Rohan Das', 'rohan@example.com', '2026-09-15')
+insert into Bookings (SessionID, MemberID, BookingDate) values
+    (1, 1, '2026-10-05'),  -- Kavya into Monday Yoga
+    (2, 1, '2026-10-05'),  -- Kavya into Wednesday Yoga too
+    (1, 2, '2026-10-06')   -- Rohan into Monday Yoga
+insert into MembershipPlans (PlanName, PlanPrice) values ('Monthly', 1500.00), ('Annual', 15000.00)
+insert into Payments (MemberID, PlanID, AmountPaid, PaymentDate) values
+    (1, 1, 1500.00, '2026-10-01'),
+    (2, 2, 14000.00, '2026-09-15')  -- Rohan got a discount off the 15000 list price
+
+-- Test 1: update anomaly - fix an instructor's name once, see it everywhere via join
+update Instructors set InstructorName = 'Arjun Mehta-Shah' where InstructorID = 2
+select s.SessionID, c.ClassName, i.InstructorName, s.SessionDate
+from Sessions s
+join Classes c on s.ClassID = c.ClassID
+join Instructors i on s.InstructorID = i.InstructorID
+where i.InstructorID = 2
+
+-- Test 2: delete anomaly - delete a session, confirm Class/Instructor/Room survive
+delete from Bookings where SessionID = 3
+delete from Sessions where SessionID = 3
+select * from Classes where ClassID = 2
+select * from Instructors where InstructorID = 2
+select * from Rooms where RoomID = 1
+
+-- Test 3: insert anomaly - add a class with zero sessions scheduled
+insert into Classes (ClassName) values ('Pilates')
+select * from Classes
+select s.* from Sessions s join Classes c on s.ClassID = c.ClassID where c.ClassName = 'Pilates'
+```
+
+**Test 1, real result - update one instructor's name once, see it everywhere via the join:**
+
+| SessionID | ClassName | InstructorName | SessionDate |
+|---|---|---|---|
+| 2 | Yoga | Arjun Mehta-Shah | 2026-10-14 |
+| 3 | Spin | Arjun Mehta-Shah | 2026-10-13 |
+
+One `update`, touching exactly one row in `Instructors`, and both of Arjun's sessions - a Yoga class on one day and a completely different Spin class on another - agree on his name through the join. No per-session copy to chase down, because there never was one.
+
+**Test 2, real result - delete a session, confirm the things it referenced survive:**
+
+`delete from Bookings where SessionID = 3` affected 0 rows, for a real reason worth noting rather than skating past: the sample data never actually booked any member into the Spin session (`SessionID 3`) - only into the two Yoga sessions. So that cleanup delete had nothing to do here, which is a fine, boring, correct outcome, not a bug.
+
+| ClassID | ClassName |
+|---|---|
+| 2 | Spin |
+
+| InstructorID | InstructorName |
+|---|---|
+| 2 | Arjun Mehta-Shah |
+
+| RoomID | RoomName | MaxCapacity |
+|---|---|---|
+| 1 | Room 1 | 20 |
+
+The Spin session itself is gone, but `Spin` the class, `Arjun Mehta-Shah` the instructor, and `Room 1` all survived the delete - exactly the point. Deleting one scheduled occurrence doesn't erase the class it was an occurrence of, the person who was going to teach it, or the room it was going to happen in - because none of those three facts ever lived inside the `Sessions` row in the first place.
+
+**Test 3, real result - add a class with zero sessions scheduled:**
+
+| ClassID | ClassName |
+|---|---|
+| 1 | Yoga |
+| 2 | Spin |
+| 3 | Pilates |
+
+```
+SessionID   ClassID   InstructorID   RoomID   SessionDate   SessionTime
+(0 rows affected)
+```
+
+`Pilates` now exists as a class with zero matching rows in `Sessions` - structurally impossible in a design where "class" only existed as a column baked onto a scheduled row, same as `Neha Singh` existing in `Customers3NF` with zero orders back in section 6. All three anomalies, checked against a schema that was designed normalized from the start rather than fixed into that shape afterward - and all three come back clean.
