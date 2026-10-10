@@ -60,7 +60,7 @@ Every SQL statement falls into one of four buckets, by what it actually does to 
 - **DDL (Data Definition Language)** — defines or changes the *structure* itself: `create`, `alter`, `drop`, `truncate`. Creating a database, creating a table, adding a column, dropping a table — none of these touch the rows inside a table, they touch the table (or database) itself.
 - **DML (Data Manipulation Language)** — works with the *data inside* structures that already exist: `insert`, `update`, `delete`. (`select` reads data rather than manipulating it, so some material calls it out separately as **DQL**, Data Query Language — SQL Server's own documentation and most textbooks still fold it into DML since it's the fourth of the classic "CRUD" verbs; both groupings are common, so don't be thrown if a source you read draws that line differently.)
 - **DCL (Data Control Language)** — permissions: `grant`, `revoke`, `deny`. Not used anywhere in this series yet — nobody's managing multi-user access on a personal practice database — but it's the real answer to "who's allowed to do what" in a production system.
-- **TCL (Transaction Control Language)** — `begin transaction`, `commit`, `rollback`, `savepoint`. This is where **ACID** lives — Atomicity, Consistency, Isolation, Durability, the four guarantees a transaction gives you (either all its changes happen or none do; the database never ends up in a half-updated state; concurrent transactions don't corrupt each other; once committed, a change survives a crash). Not just the acronym here — full, hands-on treatment (including what can go wrong without it) is `07 sql acid concurrency.md`'s entire job, so it isn't repeated in miniature in this doc.
+- **TCL (Transaction Control Language)** — `begin transaction`, `commit`, `rollback`, `savepoint`. This is where **ACID** lives — Atomicity, Consistency, Isolation, Durability, the four guarantees a transaction gives you (either all its changes happen or none do; the database never ends up in a half-updated state; concurrent transactions don't corrupt each other; once committed, a change survives a crash). Not just the acronym here — full, hands-on treatment (including what can go wrong without it) is `08 sql acid concurrency.md`'s entire job, so it isn't repeated in miniature in this doc.
 
 ### The database and tables you actually created — as real DDL
 
@@ -531,6 +531,178 @@ This is a different shape from the previous two: the inner query references `a.A
 
 ---
 
+## 6. `update` and `delete`
+
+Everything so far has only *read* `Transactions` - section 1 named `update` and `delete` as the other two DML verbs alongside `insert`, but neither one actually got its own demo. Both of them deserve one: they're the two statements that can genuinely destroy or corrupt real data if the `where` clause is wrong, missing, or just not thought through - which is exactly what this section proves, on purpose, on real data.
+
+A reminder of what's actually sitting in `Transactions` right now, since this whole section is about changing and removing rows from it - this is the same table from the schema intro at the top of this doc, unchanged since then:
+
+| TransactionID | AccountID | CategoryID | TransactionDate | Amount |
+|---|---|---|---|---|
+| 101 | 1 | 1 | 2026-01-05 | -50.00 |
+| 102 | 1 | 2 | 2026-01-10 | -20.00 |
+| 103 | 2 | 3 | 2026-01-12 | 500.00 |
+| 104 | 3 | 1 | 2026-01-15 | -10.00 |
+| 105 | NULL | 2 | 2026-01-20 | -15.00 |
+
+Every demo below runs inside `begin transaction` / `rollback transaction` on purpose - not because `update`/`delete` need a transaction to work (they don't; each one commits immediately on its own by default), but because this exact table gets reused as-is in every doc from here through doc 08, so nothing in it can be allowed to permanently change just to prove a point about syntax. The real result of each change is still captured below before the rollback undoes it.
+
+### `update` - changing one row
+
+**Give transaction 102 a corrected amount of -25.00.**  
+so this question is asking us to change exactly one existing row's `Amount` column, leaving every other row untouched.
+
+```sql
+update Transactions set Amount = -25.00 where TransactionID = 102;
+select TransactionID, Amount from Transactions where TransactionID = 102;
+```
+
+Real output - *(1 row affected)*, then:
+
+| TransactionID | Amount |
+|---|---|
+| 102 | -25.00 |
+
+Real output after the rollback, same query re-run:
+
+| TransactionID | Amount |
+|---|---|
+| 102 | -20.00 |
+
+Back to the original value - confirming the rollback genuinely undid it, not just that the demo moved on. `update`'s shape is always the same: `set column = new_value`, then a `where` that decides which rows get it. Here `where TransactionID = 102` matches exactly one row, because `TransactionID` is the primary key - but `where` doesn't know or care that it's a key; it just evaluates the same condition against every row and changes whichever ones come back `true`, which is exactly what the next demo exploits on purpose.
+
+### `update` - changing several rows at once
+
+**Apply a 10% discount to every outflow (every transaction with a negative amount).**  
+so this question is asking for one `update` statement to touch *every row that matches*, not one row chosen by its key - whatever `where Amount < 0` matches this time is whatever gets changed, however many rows that turns out to be.
+
+```sql
+update Transactions set Amount = Amount * 0.9 where Amount < 0;
+select TransactionID, Amount from Transactions order by TransactionID;
+```
+
+Real output - *(4 rows affected)*, then:
+
+| TransactionID | Amount |
+|---|---|
+| 101 | -45.00 |
+| 102 | -18.00 |
+| 103 | 500.00 |
+| 104 | -9.00 |
+| 105 | -13.50 |
+
+Four rows matched `Amount < 0` (101, 102, 104, 105) and each one really did get multiplied by 0.9 - `-50.00 → -45.00`, `-20.00 → -18.00`, `-10.00 → -9.00`, `-15.00 → -13.50`. `103` (`500.00`, a positive inflow) correctly sat out untouched, because it never matched the `where` clause at all. Real output after the rollback, same query re-run:
+
+| TransactionID | Amount |
+|---|---|
+| 101 | -50.00 |
+| 102 | -20.00 |
+| 103 | 500.00 |
+| 104 | -10.00 |
+| 105 | -15.00 |
+
+All five back to their original values. This is the real, practical difference between the two `update`s above: the first one's `where` happened to match one row because it filtered on a unique key; this one's `where` matched however many rows satisfied a condition that had nothing to do with uniqueness - `update` itself never distinguishes between those two cases, it just changes whatever `where` hands it.
+
+### The real danger - forgetting the `where` clause entirely
+
+**Run that same kind of `update`, but this time leave the `where` clause off.**  
+so this question is asking what SQL Server actually does, for real, when an `update` statement has no `where` clause at all - not "be careful," an actual demonstrated answer.
+
+```sql
+update Transactions set Amount = 0;
+select TransactionID, Amount from Transactions order by TransactionID;
+```
+
+Real output - *(5 rows affected)*, then:
+
+| TransactionID | Amount |
+|---|---|
+| 101 | 0.00 |
+| 102 | 0.00 |
+| 103 | 0.00 |
+| 104 | 0.00 |
+| 105 | 0.00 |
+
+Every single row, including `103`'s real `500.00` inflow, got overwritten to `0.00` - because with no `where` clause, `update`'s condition is implicitly "true for every row," and it did exactly what it was told. This is the single most common way `update` causes real, unintended data loss in practice: not a typo in the `set` clause, but a missing or mistyped `where` clause turning a one-row fix into a whole-table wipe. Real output after the rollback:
+
+| TransactionID | Amount |
+|---|---|
+| 101 | -50.00 |
+| 102 | -20.00 |
+| 103 | 500.00 |
+| 104 | -10.00 |
+| 105 | -15.00 |
+
+Restored, because this demo was deliberately wrapped in a transaction - in real life, without one, that `0.00` would have been committed the instant the statement ran, and the only way back would be a database backup, not a `rollback`.
+
+### `delete` - removing one row
+
+**Remove transaction 105 - the one with no `AccountID` - from the table.**  
+so this question is asking to remove exactly one specific row, using its primary key, the same way the first `update` demo targeted one row.
+
+```sql
+delete from Transactions where TransactionID = 105;
+select TransactionID from Transactions order by TransactionID;
+```
+
+Real output - *(1 row affected)*, then:
+
+| TransactionID |
+|---|
+| 101 |
+| 102 |
+| 103 |
+| 104 |
+
+105 is genuinely gone - four rows left, not five. `delete` takes no column list and no `set` - there's nothing to assign, a row either survives the `where` clause or it's removed entirely. Real output after the rollback:
+
+| TransactionID |
+|---|
+| 101 |
+| 102 |
+| 103 |
+| 104 |
+| 105 |
+
+105 is back - confirming `delete`, like `update`, is only undone because this demo chose to wrap it in a transaction.
+
+### `delete` - removing several rows at once
+
+**Remove every outflow transaction (every negative amount) in one statement.**  
+so this question is asking the same "no `where`, no mercy" question as the multi-row `update` above, but for `delete` - how many rows actually go, and what's left.
+
+```sql
+delete from Transactions where Amount < 0;
+select TransactionID from Transactions order by TransactionID;
+```
+
+Real output - *(4 rows affected)*, then:
+
+| TransactionID |
+|---|
+| 103 |
+
+Four rows gone (101, 102, 104, 105), leaving only 103 - the one positive-amount row, exactly as `where Amount < 0` promised. A `delete` with no `where` clause at all behaves exactly like the forgotten-`where` `update` above: every row matches, every row goes, and - without a transaction wrapping it - there'd be nothing left to `rollback`. Real output after the rollback, confirming all five rows restored:
+
+| TransactionID |
+|---|
+| 101 |
+| 102 |
+| 103 |
+| 104 |
+| 105 |
+
+### Quick reference
+
+| Statement | Shape | What a missing/wrong `where` does |
+|---|---|---|
+| `update` | `update table set col = value [where condition]` | Changes every row in the table, not just the one(s) intended. |
+| `delete` | `delete from table [where condition]` | Removes every row in the table, not just the one(s) intended. |
+
+Both statements report `(N rows affected)` the instant they run, for the exact same reason section 1's DDL-vs-DML comparison flagged - they touch rows, so SQL Server always tells you how many. That number is worth reading every time, not just when something looks wrong: an `update` or `delete` that reports a *different* row count than expected is often the first and only warning something's about to go wrong, before it becomes unrecoverable.
+
+---
+
 ## Interview questions
 
 These are the kind of questions this topic actually draws in an interview — conceptual, meant to be answered out loud without looking anything up. Every one of them is answerable straight from what's above; work through them from memory first, then check back against the doc for anything shaky. No answers are given here on purpose — say them out loud or write them out, and share them if you want them checked.
@@ -548,6 +720,8 @@ These are the kind of questions this topic actually draws in an interview — co
 11. Why would you generally avoid `select *` in real application code?
 12. Why is `decimal` the right choice for money instead of `float`, specifically?
 13. What are ACID and TCL, and how do they relate to each other?
+14. What's the single most dangerous mistake someone can make with `update` or `delete`, and what does SQL Server actually do if you make it - does it warn you first?
+15. Does `update`/`delete` report how many rows it touched the same way `insert` does? Why does that number matter in practice?
 
 ---
 
