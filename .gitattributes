@@ -1,0 +1,2 @@
+# Exclude diagram-generator scripts from GitHub's language stats
+*.py linguist-detectable=false
