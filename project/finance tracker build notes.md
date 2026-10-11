@@ -1068,9 +1068,7 @@ Questions along the way: none — understood on the first pass.
 
 Every window function on the Required Coverage checklist is done — `row_number()`, `rank()`, `dense_rank()`, `lag()`, `lead()`, and `sum() over()` with an explicit frame clause, all proven on this project's own real data. The checklist's next item is Common Table Expressions, `05 sql ctes.md` — and this project already has unfinished business with one: Piece 15's full outer join used a derived table (an inline subquery in the `FROM` clause) specifically because CTEs hadn't been covered yet, with an explicit note that it was "a strong candidate to revisit... once that piece comes up." A plain CTE (`with ... as (...)`) would just be a cleaner way to write that same derived table. A more interesting use of a CTE, though, is one a derived table structurally cannot do at all: a **recursive** CTE, which can walk a hierarchy of unknown depth — and this project already has a real hierarchy to walk, `Categories.ParentCategoryID`, the same self-referencing relationship Piece 16's self-join covered. The difference this piece will make visible: Piece 16's self-join can only ever see one level — a child and its immediate parent, in the same row — while a recursive CTE can walk every level, however many there turn out to be, starting from the top and working down.
 
-## Next piece — Piece 24: a recursive CTE (walking the full Categories hierarchy, top to bottom)
-
-Not yet run. Expect 5 rows: Essentials and Entertainment at Level 0 (no parent — they're the top of the hierarchy), then Groceries and Rent at Level 1 under Essentials, and Movies at Level 1 under Entertainment. With this project's real data only two levels deep, this piece can't yet prove a recursive CTE walking three or more levels down — that would need a category with a grandparent, which doesn't exist yet in this schema's real data.
+## Piece 24 — a recursive CTE (walking the full Categories hierarchy, top to bottom)
 
 ```sql
 with CategoryHierarchy as (
@@ -1087,4 +1085,82 @@ with CategoryHierarchy as (
 select CategoryID, CategoryName, ParentCategoryID, Level
 from CategoryHierarchy
 order by Level, CategoryID;
+```
+
+Confirmed real output:
+
+```
+CategoryID  CategoryName   ParentCategoryID  Level
+----------  -------------  ----------------  -----
+1           Essentials     NULL              0
+2           Entertainment  NULL              0
+3           Groceries      1                 1
+4           Rent           1                 1
+5           Movies         2                 1
+
+(5 rows affected)
+```
+
+Notes:
+- **What this query is doing, explained very simply, broken into small pieces:** this is the one thing that actually makes it feel confusing, so it gets its own plain-English name: this is not really "a query joining itself." It is one query that quietly **runs multiple times in a row**, like a loop, and each time it runs it only looks at what the *previous* run just found — never the whole growing pile of results, and never itself while it's still running.
+
+  Think of it like passing a note around a circle of people, one person at a time:
+  - **Person 1 (the anchor member)** writes down the names of the two categories that have no parent at all — Essentials and Entertainment — and passes that small note on. Person 1 only ever does this once.
+  - **Person 2 (the recursive member, round 1)** receives that note (just those 2 names), and asks "does `Categories` have anyone whose parent is one of the names on this note?" It finds 3 — Groceries and Rent (children of Essentials) and Movies (child of Entertainment) — writes *those* 3 names on a brand new note, and passes that new note on.
+  - **Person 2 does the exact same thing again (round 2)**, but now holding the note with only 3 names on it (Groceries, Rent, Movies). It asks "does anyone have one of THESE as a parent?" Nobody does — none of these three categories have any children in the real data — so this round's note comes back completely blank.
+  - **A blank note is the stop signal.** Nobody is told in the SQL "stop after 2 rounds" — the loop simply ends itself the moment a round finds nothing new to add.
+  - Every note that got written down along the way — person 1's 2 names, person 2's first 3 names, and person 2's second blank note (which adds nothing) — all get stacked together into one final pile. That stacking is literally what the `union all` in the middle of the query is doing: gluing every round's output together into the single final result, 5 rows total.
+
+  A real-life version of this: think of finding everyone in a family tree starting from a grandparent — first you write down the grandparent, then you find their kids, then you go find THEIR kids, and you keep going down generation by generation until a generation turns up with no kids at all, which is when you naturally stop. Nobody has to tell you in advance how many generations there are.
+
+  Where this shows up in real life: any menu, folder structure, org chart, or comment-thread-with-replies feature — anything where an item can contain more of itself, nested to an unknown depth — is built on exactly this pattern. A single category's parent (Piece 16's self-join) only ever gives you one generation; this recursive CTE can walk the whole family tree, however deep it turns out to be.
+
+  **The specific part that was going over your head, named directly:** when the recursive member writes `inner join CategoryHierarchy ch`, that is NOT "joining itself to the whole final answer," and it's not actually recursive in a scary self-referencing way either — `CategoryHierarchy` there means "whatever note was just passed to me a moment ago," nothing more. SQL Server enforces this: you genuinely cannot see the whole accumulated table from inside the recursive member, only the previous round's rows — which is also exactly why trying to run that `select` on its own, outside the `with` block, fails with the real error on this project's own `.sql` file: `Invalid object name 'CategoryHierarchy'`. That name was never a real, independently queryable table the way Piece 15's derived table was — it only exists as this one-round-at-a-time hand-off, and only inside this query.
+- **What this query is doing, technical step-by-step:** two members, glued together, running as an iterative loop rather than a single self-referencing evaluation.
+
+  1. **The anchor member** — `select CategoryID, CategoryName, ParentCategoryID, 0 as Level from Categories where ParentCategoryID is null` — runs exactly once and seeds the recursion. It must be a query that does NOT reference `CategoryHierarchy` at all, since nothing exists to reference yet. On this real data it returns 2 rows (CategoryID 1 and 2), and the literal `0 as Level` is what starts the depth counter at the top of the tree.
+
+  2. **`union all`** is what structurally joins the anchor member to the recursive member — not a regular join on a column, just "stack these result sets on top of each other," the same operator from Piece 17, except `union all` specifically (not plain `union`) because a recursive CTE is not allowed to deduplicate between rounds; each round's rows are kept exactly as produced.
+
+  3. **The recursive member** — `select c.CategoryID, c.CategoryName, c.ParentCategoryID, ch.Level + 1 from Categories c inner join CategoryHierarchy ch on c.ParentCategoryID = ch.CategoryID` — is the part SQL Server re-executes, round after round, substituting in only the PREVIOUS round's output wherever `CategoryHierarchy` (aliased `ch`) appears. Round 1 sees `ch` = the anchor's 2 rows, and finds every `Categories` row whose `ParentCategoryID` matches one of those 2 `CategoryID`s — the 3 children, each one level deeper (`ch.Level + 1` turns round 0's `Level = 0` into `Level = 1`). Round 2 sees `ch` = those same 3 rows from round 1, looks for children of CategoryID 3, 4, or 5, and finds none — an empty result, which is the built-in termination condition: SQL Server stops recursing the instant a round adds zero new rows, with no explicit `stop` or loop counter written anywhere in the SQL.
+
+  4. **The final `select ... from CategoryHierarchy`**, outside the `with` block, is the only place `CategoryHierarchy` means "everything from every round combined" — all 5 rows, from the `union all` of round 0's 2 plus round 1's 3 (round 2 contributed 0 and ended things). The closing `order by Level, CategoryID` just controls display order; it has nothing to do with the recursion itself, which already finished before this line runs.
+- **How this connects to `05 sql ctes.md` and `02 sql joins.md`:** `05 sql ctes.md` covers the plain, non-recursive CTE as a cleaner way to write Piece 15's derived table — this piece goes further, into recursive CTEs specifically, which a plain derived table or subquery cannot do at all (a derived table is evaluated once, it can't re-run itself against its own prior output). This also directly extends `02 sql joins.md`'s self-join material from Piece 16: Piece 16's `child.ParentCategoryID = parent.CategoryID` self-join is structurally the same comparison used inside this recursive member — the difference is Piece 16 ran that comparison exactly once (one level), while this piece re-runs the identical comparison once per round until a round comes up empty, which is what lets it reach arbitrary depth instead of just one level.
+- **Visual representation:** the diagram below shows the full trace — the anchor/recursive split at the top, the real 3-round "pass the note along" execution in the middle (including the real round 2 that comes back empty and stops everything), and the final 5-row result at the bottom, color-coded by which round actually produced each row.
+
+![Piece 24 recursive CTE diagram](finance_tracker_db/diagrams/piece24_recursive_cte.png)
+
+- **Real proof of the limitation this piece's own data has:** this project's `Categories` table is only 2 levels deep (a handful of parents, and their direct children — no grandchildren), so round 2 genuinely coming back with 0 rows is what naturally stopped the recursion here. The mechanism this piece demonstrates would keep going exactly the same way for a 3rd, 4th, or 10th level, if the real data had one — nothing about the query itself is limited to 2 levels, only this project's current real `Categories` rows are.
+
+Questions along the way: none — understood on the first pass.
+
+---
+
+CTEs are done — a plain derived-table-style CTE was effectively already covered conceptually back in Piece 15's notes, and this piece covered the genuinely new part, recursion. The Required Coverage checklist's next item is indexes and execution plans, `06 sql indexes execution plans.md` — and this is the one piece on the whole checklist that can't honestly run on this project's current real data as-is. Indexes exist to make SQL Server avoid scanning every row; with only 5 real `Transactions` rows, a full table scan and an index seek cost basically the same, so a genuine before/after proof (one query plan scanning, the same query after an index seeking instead) needs real data at real scale — the spec itself calls for "thousands of transactions, not a handful" for exactly this reason.
+
+Rather than skip indexing or fake the scale, the next piece bulk-seeds `Transactions` up to real volume first, so the indexing piece right after it can show a genuine, measurable before/after on this project's own real (if synthetic-content) data — same "real confirmed output only" discipline as every other piece, just applied to a bigger table.
+
+## Next piece — Piece 25: bulk-seeding Transactions to real scale (5,000 synthetic rows)
+
+Not yet run. This generates 5,000 new rows using a "tally table" trick (`sys.all_columns cross join sys.all_columns`, a standard way to get a large row count to count off of without a physical numbers table) and `checksum(newid())` to get a genuinely different random value per row — plain `rand()` would compute once for the whole statement and give every row the identical value, which `checksum(newid())` avoids since `newid()` itself is evaluated fresh per row. Expect the final `select count(*)` to return **5005** — the 5,000 new synthetic rows plus the 5 real rows already confirmed since Piece 9.
+
+```sql
+;with Tally as (
+    select top (5000) row_number() over (order by (select null)) as n
+    from sys.all_columns a cross join sys.all_columns b
+)
+insert into Transactions (AccountID, CategoryID, TransactionDate, Amount, Description)
+select
+    AccountID       = (abs(checksum(newid())) % 3) + 1,
+    CategoryID      = case abs(checksum(newid())) % 3
+                           when 0 then 3   -- Groceries
+                           when 1 then 4   -- Rent
+                           else 5          -- Movies
+                       end,
+    TransactionDate = dateadd(day, -(abs(checksum(newid())) % 730), '2026-10-11'),
+    Amount          = cast(-1 * ((abs(checksum(newid())) % 499900) / 100.0 + 1) as decimal(10,2)),
+    Description     = 'Synthetic transaction #' + cast(n as varchar(10))
+from Tally;
+
+select count(*) as TotalTransactions from Transactions;
 ```
