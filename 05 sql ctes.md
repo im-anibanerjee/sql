@@ -33,7 +33,7 @@ No new setup for this doc - CTEs get layered on top of tables that already exist
 
 ## How the diagrams in this doc work
 
-Same five-panel layout as doc 04's window-function diagrams (`build_concept_infographic` in `make_concept_diagrams.py`) - one source table, no second table to match against, so no Venn-shaped kept/dropped region. Row 1 is the source table plus the SQL; row 2 is the step-by-step trace; row 3 is the real output plus key takeaways.
+Same five-panel layout as doc 04's window-function diagrams - one source table, no second table to match against, so no Venn-shaped kept/dropped region. Row 1 is the source table plus the SQL; row 2 is the step-by-step trace; row 3 is the real output plus key takeaways.
 
 The recursive CTE diagram bends this slightly: instead of each step being a static bucket of the source table (like a `partition by` group), each step is a full *pass* of the recursion - the anchor runs once, then the recursive member re-runs against whatever the previous pass just added, until a pass adds nothing new. The "running total" column tracks how the result set grows pass by pass, since that's the part worth watching for a recursive CTE.
 
