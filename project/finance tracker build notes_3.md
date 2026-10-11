@@ -317,9 +317,7 @@ CTEs are done — a plain derived-table-style CTE was effectively already covere
 
 Rather than skip indexing or fake the scale, the next piece bulk-seeds `Transactions` up to real volume first, so the indexing piece right after it can show a genuine, measurable before/after on this project's own real (if synthetic-content) data — same "real confirmed output only" discipline as every other piece, just applied to a bigger table.
 
-## Next piece — Piece 25: bulk-seeding Transactions to real scale (5,000 synthetic rows)
-
-Not yet run. This generates 5,000 new rows using a "tally table" trick (`sys.all_columns cross join sys.all_columns`, a standard way to get a large row count to count off of without a physical numbers table) and `checksum(newid())` to get a genuinely different random value per row — plain `rand()` would compute once for the whole statement and give every row the identical value, which `checksum(newid())` avoids since `newid()` itself is evaluated fresh per row. Expect the final `select count(*)` to return **5005** — the 5,000 new synthetic rows plus the 5 real rows already confirmed since Piece 9.
+## Piece 25 — bulk-seeding Transactions to real scale (5,000 synthetic rows)
 
 ```sql
 ;with Tally as (
@@ -341,3 +339,162 @@ from Tally;
 
 select count(*) as TotalTransactions from Transactions;
 ```
+
+Confirmed real output:
+
+```
+TotalTransactions
+-----------------
+5005
+
+(1 row affected)
+```
+
+Notes:
+- **What this query is doing, explained simply:** picture a machine that stamps out 5,000 blank transaction slips, one after another, and for every single slip it rolls several separate, independent dice: one die decides which of the 3 real accounts the slip belongs to, another decides which of the 3 real categories, another decides how many days ago it happened, and another decides how much money it was for. Nothing about slip #247 influences slip #248 — each slip's dice rolls are completely fresh and unrelated to every other slip's. By the end, 5,000 brand-new, randomly-filled-in transactions have been dropped into the real `Transactions` table, on top of the 5 real ones already there since Piece 9 — which is exactly why the final count comes back 5005, not 5000.
+
+  A real-life version of this: think of a raffle drum that gets spun fresh for every single ticket, rather than being spun once and that one result copied onto every ticket. Each spin is independent, so two tickets can land on completely different numbers even though they came from the same drum.
+
+  Where this shows up in real life: this exact pattern — generate a large batch of realistic fake data fast — is what QA engineers and database teams do constantly to "load test" a database or practice tuning it, without needing to wait for thousands of real users to generate thousands of real rows first.
+
+  **Why the query itself is complex — the short version before the line-by-line breakdown below:** every single value in this query is being randomly chosen, and SQL Server doesn't have a simple built-in "give me a random number" button the way some other tools do — it has to be built out of a trick (`checksum(newid())`), and that same trick has to be repeated, separately, for every single column that needs its own independent random choice. That repetition is most of why it looks dense.
+- **What this query is doing, technical step-by-step — the full formula, broken down line by line:** this is the part that was flagged as complex, so it's worth walking through slowly, piece by piece. The core trick behind every random value in this query is the same three functions stacked together: `newid()` generates a brand-new, genuinely random GUID (a long unique ID) every time it's called — literally once per row, not once per query; `checksum(newid())` converts that GUID into an ordinary integer, which can come out negative; `abs(...)` strips the negative sign off, so the result is always a positive whole number. Everything else in each line is just shaping that one random positive integer into the right range for that column.
+
+  **`AccountID = (abs(checksum(newid())) % 3) + 1`** — `% 3` is the modulo operator: it divides by 3 and keeps only the remainder, which can only ever be 0, 1, or 2, no matter how big the random number was. `+ 1` shifts that up to 1, 2, or 3 — exactly matching the 3 real `AccountID`s that already exist in `Accounts` (Piece 4), so every synthetic transaction lands on a real account, never a fake one.
+
+  **`CategoryID = case abs(checksum(newid())) % 3 when 0 then 3 when 1 then 4 else 5 end`** — this calls `newid()` again, completely separately from the `AccountID` line above, so the category chosen for a row has nothing to do with which account got chosen for that same row — they're independent dice rolls. `% 3` again gives 0, 1, or 2, and the `case ... when ... then ... end` (first seen as a case-matching tool back when categories were seeded) translates each of those three outcomes into one of the three real leaf `CategoryID`s this project actually tags transactions with — 3 (Groceries), 4 (Rent), or 5 (Movies) — matching the exact same real-data convention Piece 9 established: transactions are tagged to specific leaf categories, never to the parent categories Essentials (1) or Entertainment (2) directly.
+
+  **`TransactionDate = dateadd(day, -(abs(checksum(newid())) % 730), '2026-10-11')`** — another fresh, independent `newid()` call. `% 730` gives a number from 0 to 729 — roughly 2 years' worth of individual days. The `-` in front makes that number negative, and `dateadd(day, -N, '2026-10-11')` means "take this fixed date and go back N days" — so the result lands anywhere from today itself (when the random number happens to be 0) to just over 2 years in the past (when it's 729), spreading the 5,000 rows realistically across a 2-year window instead of bunching them all on one date.
+
+  **`Amount = cast(-1 * ((abs(checksum(newid())) % 499900) / 100.0 + 1) as decimal(10,2))`** — the most layered line, so it unpacks in order, inside out: `% 499900` (yet another fresh `newid()`) gives a whole number from 0 to 499,899. `/ 100.0` divides that by 100 — dividing by a decimal number specifically (`100.0`, not plain `100`) forces SQL Server to do decimal division and keep the cents, instead of integer division, which would just throw the cents away — turning the 0-to-499,899 range into 0.00 to 4998.99. `+ 1` nudges that up to 1.00-4999.99, so no synthetic transaction is ever exactly $0.00. `-1 * (...)` flips the whole thing negative, matching this project's established rule since Piece 9 that spending is recorded as a negative `Amount`. Finally, `cast(... as decimal(10,2))` locks the result to exactly 2 decimal places, matching `Transactions.Amount`'s real column type (Piece 8) — without this cast, the division above could leave extra floating-point noise past the cents place.
+
+  **`Description = 'Synthetic transaction #' + cast(n as varchar(10))`** — `n` is the row counter from the `Tally` CTE (1 through 5000, the same counter the bulk-seed stub introduced). `cast(n as varchar(10))` converts that number into text, since SQL Server won't let `+` glue a number directly onto a string — both sides of a string `+` have to be text. The result is a label like "Synthetic transaction #4821", which makes every one of these 5,000 rows clearly identifiable as synthetic later, as opposed to the 5 real, hand-entered ones from Piece 9.
+
+  **Why `newid()` had to be called separately in every single line, instead of once and reused:** each `newid()` call produces a brand-new random value specific to that one call. If the *same* random value had been computed once and reused for `AccountID`, `CategoryID`, `TransactionDate`, and `Amount` all together, those four values would move in lockstep with each other in an unrealistic way — every row with, say, `AccountID = 1` would also always get the exact same `CategoryID`, the exact same date offset, and the exact same amount, since they'd all be derived from one shared number. Calling `newid()` fresh for each column is what keeps the four random choices genuinely independent of each other, the way real, unrelated transactions actually are.
+- **How this connects to `06 sql indexes execution plans.md`:** this piece exists purely to set up that doc's material — its own "the schema we're using" section opens by noting that index behavior only becomes measurable at real volume, which is exactly the gap this bulk-seed closes before the next piece runs.
+- **What this is really answering (interview-style scenario):** "how would you generate realistic test data at scale without waiting for real users" is a genuinely common interview and on-the-job question, and the `sys.all_columns cross join sys.all_columns` tally-table pattern plus `checksum(newid())` randomization is a standard, reusable answer to it — not something specific to this one project.
+
+Questions along the way: none — understood on the first pass.
+
+---
+
+With `Transactions` now at 5,005 real rows, there's finally enough scale to show indexing honestly. `06 sql indexes execution plans.md` is next on the Required Coverage checklist — the plan is to run a realistic query (one that filters or searches `Transactions`) before any index exists on the relevant column, capture its real execution plan and I/O cost (a table scan, reading all 5,005 rows), then add a non-clustered index on that column and run the identical query again to capture the real difference (an index seek, reading far fewer rows) — a genuine before/after, not an assumed one.
+
+## Piece 26 — indexes & execution plans, the "before" baseline (no index yet)
+
+```sql
+set statistics io on;
+
+select TransactionID, AccountID, CategoryID, TransactionDate, Amount
+from Transactions
+where TransactionDate >= '2026-07-01' and TransactionDate < '2026-08-01';
+
+set statistics io off;
+```
+
+Confirmed real output:
+
+```
+TransactionID  AccountID  CategoryID  TransactionDate  Amount
+-------------  ---------  ----------  ---------------  --------
+12             2          5           2026-07-06       -3621.18
+32             2          5           2026-07-26       -3006.88
+43             2          5           2026-07-07       -2668.54
+49             3          3           2026-07-10       -2897.22
+111            3          3           2026-07-09       -542.07
+...            ...        ...         ...              ...        (rows truncated here for length - 255 real rows total)
+4924           2          4           2026-07-01       -2406.98
+4926           3          5           2026-07-07       -3101.33
+4963           2          4           2026-07-03       -864.14
+5001           2          5           2026-07-19       -2188.81
+
+(255 rows affected)
+
+-- Messages tab:
+Table 'Transactions'. Scan count 1, logical reads 42, physical reads 0, page server reads 0, read-ahead reads 0,
+page server read-ahead reads 0, lob logical reads 0, lob physical reads 0, lob page server reads 0,
+lob read-ahead reads 0, lob page server read-ahead reads 0.
+```
+
+Notes:
+- **What this query is doing, explained simply:** imagine a 5,005-page phone book with no alphabetical order and no tabs — if someone asks "find every entry from July," the only honest way to answer is to flip through every single page and check each one. That's what `set statistics io` just proved really happened: `Scan count 1` means SQL Server made one single pass through the table, and `logical reads 42` is literally how many data pages it had to open and read along the way to find the 255 matching rows — it couldn't skip a single page, because nothing tells it where July's entries live.
+
+  A real-life version of this: looking for every birthday card addressed to people born in July, in a shoebox of cards thrown in with no order at all. The only way to find them all is to pick up and check every single card in the box, even the ones from January and December.
+
+  Where this shows up in real life: this is exactly the moment a real production database starts to feel slow — a report or search feature that worked fine with a handful of test rows suddenly takes much longer once a table has millions of real rows, because every query like this one is quietly reading the *entire* table just to find a small slice of it.
+
+  The same thing, step by step, in plain words:
+  step 1 — `set statistics io on` turns on a reporting feature that makes SQL Server tell the truth about how much work it actually did, printed to the Messages tab, separate from the actual query results.
+  step 2 — the `select ... where TransactionDate >= ... and TransactionDate < ...` runs exactly as written, filtering for one month's worth of transactions.
+  step 3 — with no index to guide it, SQL Server reads every page of the table (a "scan"), checking every row's `TransactionDate` against the filter one by one, keeping the 255 that match and discarding the rest.
+  step 4 — `set statistics io off` turns the reporting feature back off so it doesn't keep printing on every later query in the same session.
+- **What this query is doing, technical step-by-step:** `Scan count 1, logical reads 42` is the whole story. "Scan" here specifically means a **table/clustered index scan** — SQL Server walked the table's data pages from start to end rather than jumping to a specific location, which is the only option available when no index exists on the column being filtered (`TransactionDate`). "Logical reads" counts how many 8-KB data pages were pulled from the buffer cache to answer the query — 42 pages is effectively the real, physical size of all 5,005 rows of `Transactions` on disk right now (5,005 narrow rows comfortably fit in roughly that many pages). The key thing to hold onto for the next piece: that 42-page cost is paid in full *regardless* of how selective the filter is — this query only kept 255 of 5,005 rows (about 5%), but it still had to read all 42 pages to find them, because a scan can't tell in advance which pages contain a match.
+- **How this connects to `06 sql indexes execution plans.md`:** §1's "What does 'indexed column' actually mean?" section is this exact scenario — `TransactionDate` has never been indexed, so SQL Server's only real option is the clustered index scan just proven here. This number, 42 logical reads for a full scan, is now the real baseline the next piece's index has to actually beat.
+- **What this is really answering (interview-style scenario):** "why is this report slow, and how would you prove it" is one of the most practical, common interview and on-the-job questions in SQL — `set statistics io` is the honest, text-based way to answer it with real numbers instead of a guess, and it is exactly the tool a developer reaches for before and after adding an index, to prove the index actually helped rather than assuming it did.
+
+Questions along the way: none — understood on the first pass.
+
+---
+
+42 logical reads and a full scan is now the real, confirmed baseline. The next step is the "after": add a non-clustered index on `TransactionDate`, the exact column this query filters on, and run the identical query again to see what SQL Server actually chooses to do with it available. Worth being honest about what to expect here, rather than assuming a dramatic win: a plain index on `TransactionDate` alone tells SQL Server where the matching rows are, but this query also selects `AccountID`, `CategoryID`, and `Amount`, which aren't part of that index — so for each of the 255 matching rows, SQL Server may have to do an extra "key lookup" back into the full table to fetch those other columns. Whether that ends up cheaper or more expensive than the original 42-page scan is a real question this piece will measure, not assume.
+
+## Piece 27 — indexes & execution plans, the "after" (a non-covering index, run for real)
+
+```sql
+create index IX_Transactions_TransactionDate on Transactions(TransactionDate);
+
+set statistics io on;
+
+select TransactionID, AccountID, CategoryID, TransactionDate, Amount
+from Transactions
+where TransactionDate >= '2026-07-01' and TransactionDate < '2026-08-01';
+
+set statistics io off;
+```
+
+Confirmed real output:
+
+```
+TransactionID  AccountID  CategoryID  TransactionDate  Amount
+-------------  ---------  ----------  ---------------  --------
+12             2          5           2026-07-06       -3621.18
+32             2          5           2026-07-26       -3006.88
+43             2          5           2026-07-07       -2668.54
+49             3          3           2026-07-10       -2897.22
+111            3          3           2026-07-09       -542.07
+...            ...        ...         ...              ...        (rows truncated here for length - 255 real rows total)
+4924           2          4           2026-07-01       -2406.98
+4926           3          5           2026-07-07       -3101.33
+4963           2          4           2026-07-03       -864.14
+5001           2          5           2026-07-19       -2188.81
+
+(255 rows affected)
+
+-- Messages tab:
+Table 'Transactions'. Scan count 1, logical reads 42, physical reads 1, page server reads 0, read-ahead reads 40,
+page server read-ahead reads 0, lob logical reads 0, lob physical reads 0, lob page server reads 0, lob read-ahead reads 0,
+lob page server read-ahead reads 0.
+```
+
+Notes:
+- **What this query is doing, explained simply:** this is the real, honest surprise this piece was set up to find out: the new index got created successfully, but when the same question got asked again, SQL Server looked at the new index, looked at the old plain scan, and picked the **scan again anyway** — `logical reads` came back **42, exactly the same number as Piece 26, before the index even existed.** Adding the index did not make this particular query any cheaper, in reality, right now.
+
+  A real-life version of this: imagine a library adds a brand-new card catalog that tells you which *shelf* has books from July — but doesn't tell you anything else about those books (not the author, not the subject). If a librarian needs to pull 255 different books off that shelf anyway, one at a time, flipping to each one individually to read the extra details the catalog doesn't have, it might genuinely be faster to just walk the single aisle and grab every July book directly while they're walking past, rather than consult the catalog, walk to shelf, pull one book, go back, repeat 255 times.
+
+  Where this shows up in real life: this is one of the most common real surprises in database work — adding an index doesn't automatically make a query faster, and a database developer is expected to be able to explain *why* a specific index did or didn't get used, not just add indexes and hope.
+
+  The same thing, step by step, in plain words:
+  step 1 — the `create index` statement ran and succeeded (a real index named `IX_Transactions_TransactionDate` now genuinely exists on the table).
+  step 2 — the exact same `select` ran again, with the index available this time.
+  step 3 — SQL Server's optimizer compared two real options for answering this query: scan the whole table (42 pages, as already measured), or use the new index to find the 255 matching rows' locations, then go fetch the other columns (`AccountID`, `CategoryID`, `Amount`) for each one individually.
+  step 4 — the optimizer decided the second option would cost *more*, not less, and chose the plain scan again on purpose — which is exactly why `logical reads` came back identical at 42.
+- **What this query is doing, technical step-by-step, and the real reason the index didn't get used:** the index just created only contains `TransactionDate` (plus, implicitly, the table's clustered key, `TransactionID`, which every non-clustered index carries along for free). It does **not** contain `AccountID`, `CategoryID`, or `Amount` — all three of which this query's `select` list asks for. An index like this is called **non-covering**, because it doesn't contain every column the query needs. To actually use it, SQL Server would have to do an **index seek** to quickly find the 255 matching rows' locations via the index, and then, for *each one of those 255 rows separately*, a **key lookup** back into the real table to go fetch `AccountID`, `CategoryID`, and `Amount` — 255 individual extra lookups, each one costing at least one more logical read on top of the handful spent on the seek itself. The query optimizer estimates the cost of both real plans before running either one, and for this specific case — 255 out of 5,005 rows, about 5% of the table, needing 3 extra columns per row — it calculated that 255 key lookups would cost *more* in total than simply scanning straight through all 42 pages once. So it picked the scan, on purpose, as the genuinely cheaper real option. (`physical reads` went from 0 to 1 and `read-ahead reads` appeared at 40 this time, but that's a caching detail — whether the data was already sitting in memory from Piece 26's run or had to be pulled from disk — not a change in which plan ran; `logical reads`, the number that reflects the actual plan's cost, stayed exactly 42.)
+- **How this connects to `06 sql indexes execution plans.md`:** this is precisely the doc's point about **selectivity and covering indexes** — an index only pays for itself when either the query is selective enough that a handful of key lookups genuinely beats a full scan, or the index itself already contains every column the query needs so no key lookup is required at all. A non-covering index on a column alone is not a guarantee of a faster query; it's a tool the optimizer is free to ignore when the real numbers say a scan is cheaper, which is exactly what happened here, on this project's own real data.
+- **What this is really answering (interview-style scenario):** "I added an index but the query didn't get any faster — why?" is a genuinely common real interview question, and this piece now has a real, measured answer on this project's own data instead of a textbook one: the index wasn't covering, the query wasn't selective enough relative to the extra columns needed, and the optimizer correctly chose not to use it. The honest fix, which the next piece will prove for real, is a **covering index** — one that includes the other needed columns directly, so no key lookup is ever required.
+
+Questions along the way: none — understood on the first pass.
+
+---
+
+Piece 27 proved a real, important lesson: a plain index on just the filtered column isn't automatically a win, and the optimizer is smart enough to ignore one that doesn't actually pay off. The fix is a **covering index** — adding `include (AccountID, CategoryID, Amount)` to the index definition so those columns ride along inside the index itself. With a covering index, every column this query needs (`TransactionID` from the clustered key, `TransactionDate` as the indexed column, and `AccountID`/`CategoryID`/`Amount` from the `include` list) is available directly from the index — no key lookup back to the table required at all, for any of the 255 matching rows.
+
