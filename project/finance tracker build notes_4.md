@@ -347,43 +347,99 @@ Views are proven for real, closing out stored procedures and views together. Che
 
 The clearest way to prove a real deadlock on this project's own data is the classic circular-wait setup: two sessions each update one account first (taking out a lock on it), then each tries to update the *other* session's already-locked account — a real cycle that SQL Server's deadlock monitor has to detect and break by picking one session as the victim.
 
-## Next piece — Piece 33: deadlocks — a live two-window circular-wait demo, with a real deadlock victim
+## Piece 33 — deadlocks — a live two-window circular-wait demo, with a real deadlock victim
 
-Not yet run, and this needs two separate SSMS query windows, run in this exact order:
-
-**Window A — run this first (locks Account 1, transaction stays open):**
 ```sql
+-- window A
 begin transaction;
 
 update Accounts
 set Balance = Balance - 10.00
 where AccountID = 1;
-```
 
-**Window B — run this next (locks Account 2, transaction stays open):**
-```sql
+-- window B
 begin transaction;
 
 update Accounts
 set Balance = Balance - 10.00
 where AccountID = 2;
-```
 
-**Window A — run this next. It will block/spin ("Executing query...") because Window B already holds Account 2's lock — leave it running, don't cancel it:**
-```sql
+-- window A (blocks here, waiting on window B's lock)
 update Accounts
 set Balance = Balance - 10.00
 where AccountID = 2;
-```
 
-**Window B — run this last, while Window A is still blocked above. This closes the cycle — Window A wants Account 2 (held by B), Window B now wants Account 1 (held by A) — so SQL Server's deadlock monitor should detect it almost immediately and kill one of the two sessions automatically:**
-```sql
+-- window B (this closes the cycle)
 update Accounts
 set Balance = Balance - 10.00
 where AccountID = 1;
+
+-- window B
+rollback transaction;
+
+select
+    AccountID,
+    Balance
+from Accounts
+order by AccountID;
 ```
 
-Expect one of the two windows (unpredictable which one in advance — SQL Server picks based on internal cost heuristics) to come back with a real `Msg 1205` deadlock error, its transaction automatically rolled back; the *other* window should unblock and complete successfully, left sitting in an open transaction. Paste back whichever window shows the 1205 error (and which one, A or B), then finish by running `rollback transaction;` in the surviving window to clean up, and a final `select AccountID, Balance from Accounts order by AccountID;` to confirm the real end state.
+Confirmed real output:
+
+```
+-- Window A: update succeeds, transaction stays open
+-- (1 row affected)
+
+-- Window B: update succeeds, transaction stays open
+-- (1 row affected)
+
+-- Window A: tries to update Account 2, blocks ("Executing query...")
+
+-- Window B: tries to update Account 1, closes the cycle
+-- (1 row affected)
+
+-- Window A, immediately after: real deadlock error
+Msg 1205, Level 13, State 51, Line 3
+Transaction (Process ID 69) was deadlocked on lock resources with another process and has been chosen as the deadlock victim. Rerun the transaction.
+
+-- Window B: rollback transaction;
+-- Commands completed successfully.
+
+AccountID  Balance
+---------  -------
+1          0.00
+2          0.00
+3          0.00
+
+(3 rows affected)
+```
+
+Notes:
+- **What this query is doing, explained simply:** this builds a genuine deadlock on purpose. Window A grabs Account 1 first and holds onto it; Window B grabs Account 2 first and holds onto it. Then each one tries to also grab the *other's* account — Window A reaches for Account 2 (stuck waiting, since B is holding it), and Window B reaches for Account 1 (which A is holding). Now both sessions are stuck waiting on each other forever, with no way out on their own — that's a deadlock. SQL Server has a built-in deadlock monitor that notices this exact situation and forcibly kills one of the two sessions (picked by internal cost rules, not something either session controls) so the other one can finish. Here, Window A was the one killed — its transaction got automatically rolled back, and it received the real `Msg 1205` error telling it exactly that.
+
+  A real-life version of this: two people cooking in a kitchen, each holding one knife, and each one refuses to put their own knife down until they can also grab the other person's knife. Neither will ever get both knives this way — they're stuck forever, unless someone (a referee) steps in and makes one of them put their knife down. SQL Server is that referee, and it always intervenes rather than letting both sessions wait forever.
+
+  Where this shows up in real life: deadlocks happen in any real multi-user system (a bank, a ticket-booking site, an inventory system) whenever two transactions update the same two rows in opposite order at roughly the same time — genuinely common under real concurrent load, not a rare edge case, which is exactly why every production database has an automatic deadlock detector rather than just letting both sides hang.
+
+  The same thing, step by step, in plain words:
+  step 1 — Window A opens a transaction and updates Account 1, holding a lock on that row.
+  step 2 — Window B opens a transaction and updates Account 2, holding a lock on that row.
+  step 3 — Window A then tries to update Account 2 too, but Window B is holding that row's lock — Window A has to wait.
+  step 4 — Window B then tries to update Account 1 too, but Window A is holding that row's lock — now both sessions are waiting on each other, a genuine circular wait.
+  step 5 — SQL Server's deadlock monitor detects the cycle almost immediately, picks Window A as the victim, and automatically rolls back Window A's entire transaction, releasing its lock on Account 1.
+  step 6 — with Account 1's lock now free, Window B's blocked update finally goes through, successfully updating Account 1 too, inside Window B's own still-open transaction.
+- **What this query is doing, technical step-by-step:** SQL Server's lock manager builds an internal wait-for graph as sessions request locks already held by other sessions; when that graph forms a cycle (A waits for B, B waits for A), the deadlock monitor (which runs on a periodic interval, by default every few seconds) detects it and ends the standoff by choosing a victim — generally the transaction that would be cheapest to undo — and kills it with error 1205, automatically rolling back everything that session had done. Window B's own transaction stayed open and unbroken the whole time, so when its `rollback transaction` finally ran, it correctly undid *both* of its own pending changes together — Account 2's `-10.00` and Account 1's `-10.00` — restoring both back to their real original value, `0.00`. That's exactly what a single `rollback` is supposed to do to every change made since that session's `begin transaction`: all of it, together, not one row at a time.
+- **How this connects to `08 sql acid concurrency.md`/`07 sql transactions acid.md`:** this is a fresh, live, two-window deadlock proof specifically for this project's own data and its own `Accounts` table — required separately from the earlier `08 sql acid concurrency.md` doc's own deadlock demo, per this project's locked spec, so the coverage isn't just reused from an earlier doc.
+- **What this is really answering (interview-style scenario):** "what's a deadlock, and what does the database actually do about it?" — a deadlock is a circular lock-wait between two transactions that can never resolve on its own, and every production database (SQL Server included) runs an automatic deadlock monitor that detects the cycle and kills one side with a specific, catchable error (1205) so the other side can proceed — the practical takeaway being that application code calling the database should expect and retry on this specific error, not treat it as a fatal bug.
+
+Questions along the way: none — understood on the first pass.
+
+---
+
+Required coverage is now fully proven on real, live data: every join type, set operators, window functions, a recursive CTE over the Categories hierarchy, a real before/after indexing story (non-covering then covering), a real atomicity/rollback demo, isolation levels (a live dirty-read), a real deadlock with a genuine victim, a parameterized stored procedure, and a view — all run for real and verified against the project's own `FinanceTrackerDB`. What's left, per the locked spec, are the project's final deliverables: a decisions log and a README tying the whole build together.
+
+The project itself is done. Next is just writing the decisions log and the README.
+
 
 
 

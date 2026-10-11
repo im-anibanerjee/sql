@@ -189,3 +189,23 @@ where AccountID = 1;
 -- (1 row affected)
 -- in Window A after running the above: Msg 1205, Level 13, State 51, Line 3
 -- Transaction (Process ID 69) was deadlocked on lock resources with another process and has been chosen as the deadlock victim. Rerun the transaction.
+
+-- window B
+rollback transaction;
+-- Commands completed successfully.
+-- begin transaction in Window B already there; check above
+
+select
+    AccountID,
+    Balance
+from Accounts
+order by AccountID;
+/*
+AccountID  Balance
+---------  -------
+1          0.00
+2          0.00
+3          0.00
+
+(3 rows affected)
+*/
