@@ -17,8 +17,6 @@ Five tables, three relationship "families":
 - **Categories → Budgets** (1-to-many, amber): a budget is set per category.
 - **Categories self-join**: `ParentCategoryID → CategoryID` — a category can have a parent category (e.g. "Groceries" under "Essentials"), which is what makes the self-join and the recursive CTE later in the project meaningful rather than forced.
 
-Source: `finance_tracker_db/diagrams/gen_er_diagram.py` (regenerate with `python3 gen_er_diagram.py` from that folder).
-
 ---
 
 ## Piece 1 — Database + Users table
